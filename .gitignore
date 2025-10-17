@@ -1,0 +1,48 @@
+# Credentials and sensitive files
+creds
+*.json
+credentials.json
+gsd-campaign-creation.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing/debug files
+analyze_raw_data.py
+check_spreadsheet.py
+debug_regex.py
+verify_fix.py
+edit_suggestion
+error
+ids
+problem
+working_example
+
+# OS
+.DS_Store
+Thumbs.db
