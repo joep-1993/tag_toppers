@@ -26,52 +26,46 @@ from google.ads.googleads.errors import GoogleAdsException
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 
+# Import listing tree function
+from listing_tree import rebuild_tree_with_label_and_item_ids
+
 # =========================
 # OAuth / Config
 # =========================
 
-def load_credentials_from_env():
-    """Load all Google API credentials from environment variables or creds file."""
-    # Initialize from environment variables
-    creds = {
-        'GOOGLE_CLIENT_ID': os.getenv("GOOGLE_CLIENT_ID"),
-        'GOOGLE_CLIENT_SECRET': os.getenv("GOOGLE_CLIENT_SECRET"),
-        'GOOGLE_REFRESH_TOKEN': os.getenv("GOOGLE_REFRESH_TOKEN"),
-        'GOOGLE_DEVELOPER_TOKEN': os.getenv("GOOGLE_DEVELOPER_TOKEN"),
-        'GOOGLE_LOGIN_CUSTOMER_ID': os.getenv("GOOGLE_LOGIN_CUSTOMER_ID"),
-    }
+refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN", "your-refresh-token-here")
+developer_token = os.getenv("GOOGLE_DEVELOPER_TOKEN", "your-developer-token-here")
+login_customer_id = os.getenv("GOOGLE_LOGIN_CUSTOMER_ID", "your-login-customer-id")
 
-    # If any missing, try loading from creds file
-    if not all(creds.values()):
+def load_google_oauth_from_env():
+    # First try environment variables
+    cid = os.getenv("GOOGLE_CLIENT_ID")
+    cs  = os.getenv("GOOGLE_CLIENT_SECRET")
+
+    # If not found, try loading from creds file
+    if not cid or not cs:
         creds_file = os.path.join(os.path.dirname(__file__), 'creds')
         if os.path.exists(creds_file):
             with open(creds_file, 'r') as f:
                 for line in f:
                     line = line.strip()
-                    if '=' in line and not line.startswith('#'):
-                        key, value = line.split('=', 1)
-                        key = key.strip()
-                        value = value.strip()
-                        if key in creds and not creds[key]:
-                            creds[key] = value
+                    if line.startswith('GOOGLE_CLIENT_ID='):
+                        cid = line.split('=', 1)[1]
+                    elif line.startswith('GOOGLE_CLIENT_SECRET='):
+                        cs = line.split('=', 1)[1]
 
-    # Check for missing credentials
-    missing = [k for k, v in creds.items() if not v]
+    missing = []
+    if not cid: missing.append("GOOGLE_CLIENT_ID")
+    if not cs:  missing.append("GOOGLE_CLIENT_SECRET")
     if missing:
         raise RuntimeError(
             "Environment variables ontbreken: "
             + ", ".join(missing)
             + ".\nZet deze in het 'creds' bestand of als environment variables."
         )
-    return creds
+    return cid, cs
 
-# Load credentials
-api_creds = load_credentials_from_env()
-client_id = api_creds['GOOGLE_CLIENT_ID']
-client_secret = api_creds['GOOGLE_CLIENT_SECRET']
-refresh_token = api_creds['GOOGLE_REFRESH_TOKEN']
-developer_token = api_creds['GOOGLE_DEVELOPER_TOKEN']
-login_customer_id = api_creds['GOOGLE_LOGIN_CUSTOMER_ID']
+client_id, client_secret = load_google_oauth_from_env()
 
 # Google Ads client (OAuth via refresh token)
 google_ads_config = {
@@ -119,7 +113,7 @@ tracking_template_be = 'https://www.beslist.be/outclick/redirect?aff_id=901&para
 tracking_template_de = 'https://www.shopcaddy.de/outclick/redirect?aff_id=910&params=productId%3D{product_id}%26marketingChannelId%3D14&url={lpurl}'
 
 last_criterion_id = 0
-script_label = "GSD_SCRIPT"
+script_label = "TAGTOPPERS_SCRIPT"
 
 # =========================
 # Utilities
@@ -151,6 +145,34 @@ def ensure_campaign_label_exists(client, customer_id, label_name):
     except GoogleAdsException as ex:
         print(f'error: {ex}')
         return None
+
+def create_location_op(client, customer_id, campaign_id, country):
+    campaign_service = client.get_service("CampaignService")
+    geo_target_constant_service = client.get_service("GeoTargetConstantService")
+
+    if country == "NL":
+        location_id = "2528"
+    elif country == "BE":
+        location_id = "2056"
+    elif country == "DE":
+        location_id = "2276"
+
+    # Create the campaign criterion.
+    campaign_criterion_operation = client.get_type("CampaignCriterionOperation")
+    campaign_criterion = campaign_criterion_operation.create
+    campaign_criterion.campaign = campaign_service.campaign_path(
+        customer_id, campaign_id
+    )
+
+    # Besides using location_id, you can also search by location names from
+    # GeoTargetConstantService.suggest_geo_target_constants() and directly
+    # apply GeoTargetConstant.resource_name here. An example can be found
+    # in get_geo_target_constant_by_names.py.
+    campaign_criterion.location.geo_target_constant = (
+        geo_target_constant_service.geo_target_constant_path(location_id)
+    )
+
+    return campaign_criterion_operation
 
 def add_standard_shopping_campaign(
     client, customer_id, merchant_center_account_id, campaign_name, budget_name,
@@ -223,6 +245,20 @@ def add_standard_shopping_campaign(
         return None
 
     campaign_resource_name = campaign_response.results[0].resource_name
+
+    # Add location targeting
+    campaign_id = campaign_resource_name.split("/")[-1]
+    campaign_criterion_service = client.get_service("CampaignCriterionService")
+    operations = [
+        create_location_op(client, customer_id, campaign_id, country),
+    ]
+    try:
+        campaign_criterion_service.mutate_campaign_criteria(
+            customer_id=customer_id, operations=operations
+        )
+    except GoogleAdsException as ex:
+        #handle_googleads_exception(ex)
+        print(f'error: {ex}')
 
     # Label toevoegen
     campaign_label_service = client.get_service("CampaignLabelService")
@@ -377,9 +413,7 @@ def find_campaigns_for_shop(client, customer_id: str, shopid: str, shopname: str
         FROM campaign
         WHERE campaign.name LIKE '%shop_id:{shopid}]%'
           AND campaign.name LIKE '%shop:{_clean_shopname(shopname)}%'
-          AND campaign.name = '[shop:Woonexpress.nl] [shop_id:651354] [channel:directshopping] [branche:H&L] [label:b] [limit]'
           AND campaign.status != 'REMOVED'
-        LIMIT 1
     """
     res = ga.search(customer_id=customer_id, query=q)
     return [(row.campaign.id, row.campaign.name, row.campaign.resource_name) for row in res]
@@ -475,198 +509,6 @@ def safe_remove_entire_listing_tree(client, customer_id: str, ad_group_id: str):
         ):
             raise
 
-# -------- Label 'a' with negative Item ID exclusion (for existing campaigns) --------
-def rebuild_tree_with_label_and_item_ids(
-    client,
-    customer_id: str,
-    ad_group_id: int,
-    ad_group_name: str,            # ad group name to extract label from
-    item_ids=None,                 # list of item IDs to EXCLUDE (negative targeting)
-    default_bid_micros: int = 200_000
-):
-    """
-    Creates tree structure for EXISTING campaigns:
-    Root SUBDIVISION
-    ├─ Custom Attr 0 OTHERS [NEGATIVE] → Blocks everything without the label
-    ├─ Custom Attr 0 = <label> [SUBDIVISION]
-    │  ├─ Custom Attr 1 OTHERS [SUBDIVISION]
-    │  │  ├─ Item ID OTHERS [POSITIVE, biddable] → Show all items with the label
-    │  │  └─ Specific Item IDs [NEGATIVE] → Block unwanted items
-    │  └─ Custom Attr 1 = "promo" [NEGATIVE] → Block promo items
-
-    This uses INVERSE logic: Allow all items with the label, then block specific IDs.
-    Label is extracted from ad_group_name (a, b, c, no data, no ean).
-    """
-    if item_ids is None:
-        item_ids = []
-
-    # Extract label from ad group name (e.g., "a", "b", "c", "no data", "no ean")
-    # The ad group name in lowercase IS the label value to use
-    keep_label_value = ad_group_name.lower().strip()
-
-    valid_labels = ["a", "b", "c", "no data", "no ean"]
-
-    if keep_label_value not in valid_labels:
-        print(f"⚠️ Ad group name '{ad_group_name}' (lowercase: '{keep_label_value}') is not a valid label. Valid options: {valid_labels}. Skipping tree rebuild.")
-        return
-
-    # 1) Oude boom veilig verwijderen
-    safe_remove_entire_listing_tree(client, customer_id, str(ad_group_id))
-
-    agc = client.get_service("AdGroupCriterionService")
-    product_custom_enum = client.enums.ProductCustomAttributeIndexEnum
-
-    # MUTATE 1: Create root SUBDIVISION + Custom Attr 0 OTHERS (negative)
-    ops1 = []
-
-    # 1. ROOT SUBDIVISION
-    root_op = create_listing_group_subdivision(
-        client=client,
-        customer_id=customer_id,
-        ad_group_id=str(ad_group_id),
-        parent_ad_group_criterion_resource_name=None,
-        listing_dimension_info=None
-    )
-    root_tmp = root_op.create.resource_name
-    ops1.append(root_op)
-
-    # 2. Custom Attr 0 OTHERS (negative)
-    dim_attr0_others = client.get_type("ListingDimensionInfo")
-    client.copy_from(
-        dim_attr0_others.product_custom_attribute,
-        client.get_type("ProductCustomAttributeInfo"),
-    )
-    dim_attr0_others.product_custom_attribute.index = product_custom_enum.INDEX0
-    ops1.append(
-        create_listing_group_unit_biddable(
-            client=client,
-            customer_id=customer_id,
-            ad_group_id=str(ad_group_id),
-            parent_ad_group_criterion_resource_name=root_tmp,
-            listing_dimension_info=dim_attr0_others,
-            targeting_negative=True,
-            cpc_bid_micros=None
-        )
-    )
-
-    # Execute first mutate
-    resp1 = agc.mutate_ad_group_criteria(customer_id=customer_id, operations=ops1)
-    root_actual = resp1.results[0].resource_name
-    time.sleep(0.5)  # Wait for criteria to propagate
-
-    # MUTATE 2: Add label 'a' SUBDIVISION + Custom Attr 1 OTHERS SUBDIVISION
-    ops2 = []
-
-    # Add label 'a' SUBDIVISION
-    dim_label_a = client.get_type("ListingDimensionInfo")
-    dim_label_a.product_custom_attribute.index = product_custom_enum.INDEX0
-    dim_label_a.product_custom_attribute.value = keep_label_value
-    label_a_sub_op = create_listing_group_subdivision(
-        client=client,
-        customer_id=customer_id,
-        ad_group_id=str(ad_group_id),
-        parent_ad_group_criterion_resource_name=root_actual,
-        listing_dimension_info=dim_label_a
-    )
-    label_a_sub_tmp = label_a_sub_op.create.resource_name
-    ops2.append(label_a_sub_op)
-
-    # Add Custom Attr 1 OTHERS SUBDIVISION
-    dim_attr1_others = client.get_type("ListingDimensionInfo")
-    client.copy_from(
-        dim_attr1_others.product_custom_attribute,
-        client.get_type("ProductCustomAttributeInfo"),
-    )
-    dim_attr1_others.product_custom_attribute.index = product_custom_enum.INDEX1
-    attr1_sub_op = create_listing_group_subdivision(
-        client=client,
-        customer_id=customer_id,
-        ad_group_id=str(ad_group_id),
-        parent_ad_group_criterion_resource_name=label_a_sub_tmp,
-        listing_dimension_info=dim_attr1_others
-    )
-    attr1_sub_tmp = attr1_sub_op.create.resource_name
-    ops2.append(attr1_sub_op)
-
-    # Add Item ID OTHERS UNIT (positive, biddable)
-    dim_itemid_others = client.get_type("ListingDimensionInfo")
-    client.copy_from(
-        dim_itemid_others.product_item_id,
-        client.get_type("ProductItemIdInfo"),
-    )
-    ops2.append(
-        create_listing_group_unit_biddable(
-            client=client,
-            customer_id=customer_id,
-            ad_group_id=str(ad_group_id),
-            parent_ad_group_criterion_resource_name=attr1_sub_tmp,
-            listing_dimension_info=dim_itemid_others,
-            targeting_negative=False,
-            cpc_bid_micros=default_bid_micros
-        )
-    )
-
-    # Execute second mutate
-    resp2 = agc.mutate_ad_group_criteria(customer_id=customer_id, operations=ops2)
-    label_a_sub_actual = resp2.results[0].resource_name
-    attr1_sub_actual = resp2.results[1].resource_name
-    time.sleep(0.5)  # Wait for criteria to propagate
-
-    # MUTATE 3: Add negative Item ID UNITs + promo exclusion
-    ops3 = []
-
-    # Add specific Item IDs as NEGATIVE units
-    if item_ids:
-        unique_item_ids = list(dict.fromkeys(item_ids))
-
-        # Debug: Print IDs being excluded (negative targeting)
-        print(f"DEBUG: Excluding {len(unique_item_ids)} unique Item IDs (negative targeting):")
-        for idx, item_id in enumerate(unique_item_ids[:5], 1):  # Show first 5
-            print(f"  {idx}. '{item_id}' (length: {len(str(item_id))})")
-        if len(unique_item_ids) > 5:
-            print(f"  ... and {len(unique_item_ids) - 5} more")
-
-        for item_id in unique_item_ids:
-            dim_item = client.get_type("ListingDimensionInfo")
-            dim_item.product_item_id.value = str(item_id)
-            ops3.append(
-                create_listing_group_unit_biddable(
-                    client=client,
-                    customer_id=customer_id,
-                    ad_group_id=str(ad_group_id),
-                    parent_ad_group_criterion_resource_name=attr1_sub_actual,
-                    listing_dimension_info=dim_item,
-                    targeting_negative=True,
-                    cpc_bid_micros=None
-                )
-            )
-
-    # Add Custom Attr 1 = "promo" as NEGATIVE
-    dim_promo = client.get_type("ListingDimensionInfo")
-    dim_promo.product_custom_attribute.index = product_custom_enum.INDEX1
-    dim_promo.product_custom_attribute.value = "promo"
-    ops3.append(
-        create_listing_group_unit_biddable(
-            client=client,
-            customer_id=customer_id,
-            ad_group_id=str(ad_group_id),
-            parent_ad_group_criterion_resource_name=label_a_sub_actual,
-            listing_dimension_info=dim_promo,
-            targeting_negative=True,
-            cpc_bid_micros=None
-        )
-    )
-
-    if ops3:
-        agc.mutate_ad_group_criteria(customer_id=customer_id, operations=ops3)
-        unique_count = len(unique_item_ids) if item_ids else 0
-        total_count = len(item_ids) if item_ids else 0
-        if total_count > unique_count:
-            print(f"✅ Tree rebuilt: Allow label '{keep_label_value}', block {unique_count} unique Item IDs ({total_count-unique_count} duplicates removed) + 'promo' items.")
-        else:
-            print(f"✅ Tree rebuilt: Allow label '{keep_label_value}', block {unique_count} Item IDs + 'promo' items.")
-    else:
-        print(f"✅ Tree rebuilt: Allow label '{keep_label_value}', block 'promo' items.")
 
 # -------- ONLY specific Item IDs (INCLUDE logic - for tag_toppers campaigns) --------
 def rebuild_tree_with_specific_item_ids(
@@ -786,6 +628,58 @@ def rebuild_tree_with_specific_item_ids(
 # Spreadsheet I/O (tag_toppers input)
 # =========================
 
+def mark_rows_as_processed(
+    row_numbers: list,
+    spreadsheet_id: str = "1m4k8kxhfU7oLIAH3DJOyYx_PKSv4luPyX97j45Wa6s4",
+    worksheet_name: str = "tag_toppers",
+    column: str = "G"  # Column G is the "processed" flag column
+):
+    """
+    Marks rows as processed by setting the specified column to TRUE.
+    More efficient to call once with all row numbers after processing is complete.
+
+    Args:
+        row_numbers: List of row numbers to mark as processed (1-indexed)
+        spreadsheet_id: Google Sheets spreadsheet ID
+        worksheet_name: Name of the worksheet/tab
+        column: Column letter to update (default: G)
+    """
+    if not row_numbers:
+        return
+
+    service_account_file = SERVICE_ACCOUNT_FILE
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]  # Need write permission
+    creds = service_account.Credentials.from_service_account_file(service_account_file, scopes=scopes)
+    service = build("sheets", "v4", credentials=creds)
+    sheet = service.spreadsheets()
+
+    # Build batch update data
+    data = []
+    for row_num in row_numbers:
+        data.append({
+            "range": f"{worksheet_name}!{column}{row_num}",
+            "values": [["TRUE"]]
+        })
+
+    body = {
+        "valueInputOption": "RAW",
+        "data": data
+    }
+
+    try:
+        result = sheet.values().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body=body
+        ).execute()
+        updated_cells = result.get('totalUpdatedCells', 0)
+        print(f"✅ Marked {len(row_numbers)} row(s) as processed in column {column} ({updated_cells} cells updated)")
+    except Exception as e:
+        print(f"❌ Error updating spreadsheet: {e}")
+        print(f"   Make sure the service account has edit access to the spreadsheet!")
+        import traceback
+        traceback.print_exc()
+
+
 def get_spreadsheet_input(
     spreadsheet_id: str = "1m4k8kxhfU7oLIAH3DJOyYx_PKSv4luPyX97j45Wa6s4",
     worksheet_name: str = "tag_toppers",
@@ -875,7 +769,7 @@ def create_tag_toppers_campaign(client, customer_id: str, mc_id: int, tracking_t
     campaign_name = f"[shop:{base_shop}] [shop_id:{shopid}] [channel:directshopping] [label:tag_toppers]"
     budget_name = f"budget_{base_shop}_{shopid}_directshopping_tag_toppers_{int(time.time())}"
     # €5/dag
-    budget_micros = 5_000_000
+    budget_micros = 30_000_000
 
     # Gebruik MC-id uit bestaande campagne indien beschikbaar
     mc_id_effective = get_merchant_id_for_campaign(customer_id, shopid) or mc_id
@@ -908,24 +802,149 @@ def create_tag_toppers_campaign(client, customer_id: str, mc_id: int, tracking_t
         item_ids=item_ids,
         default_bid_micros=200_000
     )
-    time.sleep(1)  # Wait for product partition tree to stabilize
-    add_shopping_product_ad_group_ad(client, customer_id, ag_res)
-    print(f"                🆕 Campagne opgebouwd: {campaign_name}")
+
+    # Add shopping product ad with retry logic for concurrent modification errors
+    max_retries = 3
+    retry_delay = 2  # Start with 2 seconds
+
+    for attempt in range(max_retries):
+        try:
+            time.sleep(retry_delay)  # Wait for product partition tree to stabilize
+            add_shopping_product_ad_group_ad(client, customer_id, ag_res)
+            print(f"                🆕 Campagne opgebouwd: {campaign_name}")
+            break  # Success, exit retry loop
+        except GoogleAdsException as ex:
+            # Check if it's a concurrent modification error
+            is_concurrent_error = any(
+                (getattr(e.error_code, "database_error", None) and
+                 str(e.error_code.database_error) == "CONCURRENT_MODIFICATION")
+                for e in ex.failure.errors
+            )
+
+            if is_concurrent_error and attempt < max_retries - 1:
+                retry_delay *= 2  # Exponential backoff
+                print(f"                ⚠️ Concurrent modification detected, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})...")
+                continue
+            else:
+                # Either not a concurrent error, or we've exhausted retries
+                print(f"                ❌ Failed to create ad after {attempt + 1} attempts")
+                raise
+
     return camp_res
+
+def get_branded(shop_name):
+    if not shop_name:
+        return 0
+
+    sql = """
+    WITH latest AS (
+      SELECT shop_id, shop_name
+      FROM beslistbi.bt.shop_list
+      WHERE deleted_ind = 0
+        AND shop_name = %s
+      ORDER BY date DESC
+      LIMIT 1
+    )
+    SELECT COALESCE(c.f_branded, 0) AS branded
+    FROM latest l
+    LEFT JOIN beslistbi.hda.efficy_shops s
+      ON s.f_shop_id = l.shop_id
+     AND s.actual_ind = 1
+     AND s.deleted_ind = 0
+    LEFT JOIN beslistbi.hda.efficy_shop_catman c
+      ON c.k_shop = s.k_shop
+     AND c.actual_ind = 1
+     AND c.deleted_ind = 0
+    LIMIT 1;
+    """
+
+    try:
+        with closing(psycopg2.connect(
+            dbname='beslistbi',
+            user='j_vanschagen',
+            password='asjWQ@dmasm(asdm23',
+            host='production-redshiftstack-127n6djd-beslistredshift-zjsoh9hkk262.ccr4dsiux3yc.eu-central-1.redshift.amazonaws.com',
+            port='5439'
+        )) as conn, conn, closing(conn.cursor()) as cur:
+            cur.execute(sql, (shop_name,))
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                # Sommige drivers geven bool terug; cast naar int
+                return int(row[0])
+            return 0
+    except Exception as e:
+        # Optioneel: loggen met print/logging
+        # print(f"get_branded_for_shop error: {e}")
+        return 0
+
+
+def get_negatives(shopname):
+
+    if "|" in shopname:
+        shopname = shopname.split("|")[0]
+
+    if ".nl" in shopname:
+        domain = shopname.split(".nl")[0]
+    elif ".com" in shopname:
+        domain = shopname.split(".com")[0]
+    elif ".be" in shopname:
+        domain = shopname.split(".be")[0]
+    elif ".de" in shopname:
+        domain = shopname.split(".de")[0]
+
+    else:
+        return [shopname]
+    return [shopname, domain]
+
+
+def add_negative_keywords(client, customer_id, campaign_resource_name, negative_keywords):
+    campaign_criterion_service = client.get_service("CampaignCriterionService")
+
+    # Maak een lijst van operations om zowel EXACT als PHRASE varianten toe te voegen
+    operations = []
+
+    for keyword in negative_keywords:
+        for match_type in [client.enums.KeywordMatchTypeEnum.EXACT, client.enums.KeywordMatchTypeEnum.PHRASE]:
+            campaign_criterion_operation = client.get_type("CampaignCriterionOperation")
+            campaign_criterion = campaign_criterion_operation.create
+
+            campaign_criterion.campaign = campaign_resource_name
+            campaign_criterion.negative = True  # Markeer als negatief zoekwoord
+            campaign_criterion.keyword.text = keyword
+            campaign_criterion.keyword.match_type = match_type  # Voeg zowel EXACT als PHRASE toe
+
+            operations.append(campaign_criterion_operation)
+
+    # Verstuur de mutatie-aanvraag naar Google Ads API
+    try:
+        response = campaign_criterion_service.mutate_campaign_criteria(
+            customer_id=customer_id, operations=operations
+        )
+        print(
+            f"                {len(negative_keywords) * 2} negatieve zoekwoorden toegevoegd (EXACT & PHRASE) aan campagne {campaign_resource_name}: {negative_keywords}")
+    except GoogleAdsException as ex:
+        print(f"                [Error] Fout bij toevoegen van negatieve zoekwoorden: {ex}")
+
 
 # =========================
 # Main
 # =========================
 
+# no_data
+# [label_test] [shop:Wibra.nl] [shop_id:652337] [channel:directshopping] [label:no_data] [fallback]
+
 if __name__ == "__main__":
     tag_rows = get_spreadsheet_input(return_json=False)
     print(f"nr of CPR-shops to process: {len(tag_rows)}")
+
+    processed_rows = []  # Track successfully processed row numbers
 
     for campagne_data_cpr in tag_rows:
         shopname = campagne_data_cpr.get("shop_name", "")
         shopid = campagne_data_cpr.get("shop_id", "")
         domain = campagne_data_cpr.get("domain", "")
         item_ids = campagne_data_cpr.get("item_ids", [])
+        row_number = campagne_data_cpr.get("row")  # Get row number for tracking
 
         if not shopid or not shopname or not domain:
             print(f"⚠️ Rij overgeslagen (ontbrekende velden): {campagne_data_cpr}")
@@ -947,6 +966,8 @@ if __name__ == "__main__":
             print(f"⚠️ Onbekend domein: {domain}; rij overgeslagen.")
             continue
 
+        row_processed_successfully = True  # Track if this row completed without critical errors
+
         # 1) Bestaande campagnes: boom vervangen door label+item IDs (OLD LOGIC - INVERSE)
         existing = find_campaigns_for_shop(client, customer_id, str(shopid), shopname)
         if existing:
@@ -963,13 +984,33 @@ if __name__ == "__main__":
                         )
                     except GoogleAdsException as ex:
                         print(f"                ❌ Fout in ad group {ag_id}: {ex.failure}")
+                        row_processed_successfully = False
         else:
             print(f"                ℹ️ Geen bestaande campagnes gevonden voor shop_id {shopid} + shop {shopname}")
 
         # 2) Nieuwe (of hergebruik) tag_toppers campagne opzetten met ONLY specific item IDs (NEW LOGIC - INCLUSIVE)
         try:
-            create_tag_toppers_campaign(client, customer_id, mc_id, tracking_template, str(shopid), shopname, item_ids)
+            campaign_resource_name = create_tag_toppers_campaign(client, customer_id, mc_id, tracking_template, str(shopid), shopname, item_ids)
+            branded = get_branded(shopname)
+
+            if branded == 0:
+                negative_keywords = get_negatives(shopname)
+                add_negative_keywords(client, customer_id, campaign_resource_name, negative_keywords)
+
         except GoogleAdsException as ex:
             print(f"                ❌ Google Ads API error (create_tag_toppers): {ex.failure}")
+            row_processed_successfully = False
+
+        # Mark row as processed if completed successfully
+        if row_processed_successfully and row_number:
+            processed_rows.append(row_number)
+
+    # Batch update all processed rows in the spreadsheet
+    if processed_rows:
+        print(f"\n📝 Updating spreadsheet: marking {len(processed_rows)} row(s) as processed...")
+        print(f"   Rows: {processed_rows}")
+        mark_rows_as_processed(processed_rows)
+    else:
+        print(f"\n⚠️ No rows were successfully processed, spreadsheet will not be updated")
 
     print("Klaar.")
