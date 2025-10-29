@@ -112,7 +112,7 @@ def rebuild_tree_with_label_and_item_ids(
     for res_name in tree_map.keys():
         calculate_depth(res_name)
 
-    # Find all subdivisions at the deepest level
+    # Find ALL subdivisions in the tree
     subdivision_nodes = [res_name for res_name, node in tree_map.items()
                         if node['type'] == 'SUBDIVISION']
 
@@ -120,11 +120,34 @@ def rebuild_tree_with_label_and_item_ids(
         print("⚠️ No subdivision nodes found in existing tree. Cannot add Item-ID exclusions.")
         return
 
-    max_depth = max(depth_map[res_name] for res_name in subdivision_nodes)
-    lowest_subdivisions = [res_name for res_name in subdivision_nodes
-                          if depth_map[res_name] == max_depth]
+    # Find subdivisions that should have Item-ID children
+    # Strategy: Find all subdivisions that have UNIT children (these are "terminal" subdivisions)
+    # or subdivisions that have no children at all
+    target_subdivisions = []
 
-    print(f"Found {len(lowest_subdivisions)} subdivision(s) at lowest level (depth {max_depth})")
+    for sub_res in subdivision_nodes:
+        children = tree_map[sub_res]['children']
+
+        if not children:
+            # No children - this is a leaf subdivision
+            target_subdivisions.append(sub_res)
+        else:
+            # Check if it has any UNIT children
+            has_unit_children = any(tree_map[child]['type'] == 'UNIT' for child in children)
+            # Check if it has any SUBDIVISION children
+            has_subdivision_children = any(tree_map[child]['type'] == 'SUBDIVISION' for child in children)
+
+            if has_unit_children and not has_subdivision_children:
+                # Has UNIT children but no SUBDIVISION children - this is a terminal subdivision
+                target_subdivisions.append(sub_res)
+
+    if not target_subdivisions:
+        # Fallback: use deepest subdivisions
+        max_depth = max(depth_map[res_name] for res_name in subdivision_nodes)
+        target_subdivisions = [res_name for res_name in subdivision_nodes
+                              if depth_map[res_name] == max_depth]
+
+    print(f"Found {len(target_subdivisions)} target subdivision(s) for Item-ID exclusions")
 
     # Collect ALL custom label structures from the original tree (both exclusions and subdivisions)
     custom_label_structures = []
@@ -172,7 +195,7 @@ def rebuild_tree_with_label_and_item_ids(
 
     subdivisions_processed = 0
 
-    for sub_res_name in lowest_subdivisions:
+    for sub_res_name in target_subdivisions:
         print(f"  Processing subdivision: {sub_res_name}")
 
         children = tree_map[sub_res_name]['children']
@@ -182,109 +205,83 @@ def rebuild_tree_with_label_and_item_ids(
             print(f"    No children found, adding Item-ID structure directly")
             _add_item_id_exclusions_to_subdivision(
                 client, customer_id, ad_group_id, agc_service,
-                sub_res_name, unique_item_ids, default_bid_micros
+                sub_res_name, unique_item_ids, default_bid_micros,
+                skip_others=False
             )
             subdivisions_processed += 1
             continue
 
         # Check what type of children exist
-        has_item_id_children = False
-        has_positive_non_item_id_unit_children = False
-        has_non_item_id_subdivision_children = False
+        has_item_id_others = False
+        has_item_id_exclusions = False
+        has_non_item_id_units = False
 
         for child_res in children:
             child_node = tree_map[child_res]
             case_val = child_node['case_value']
 
-            if case_val and case_val._pb.WhichOneof("dimension") == "product_item_id":
-                has_item_id_children = True
-            elif child_node['type'] == 'UNIT' and not child_node['negative']:
-                # Only count POSITIVE (non-negative) units as needing special handling
-                # NEGATIVE units are exclusions and should be left as siblings
-                has_positive_non_item_id_unit_children = True
-            elif child_node['type'] == 'SUBDIVISION':
-                has_non_item_id_subdivision_children = True
+            # Check if this is an Item ID dimension
+            if case_val:
+                dim_type = case_val._pb.WhichOneof("dimension")
 
-        if has_item_id_children:
-            # Case 2: Already has Item-ID children - need to rebuild entire tree
-            print(f"    Already has Item-ID children, rebuilding entire tree to ensure consistency")
-            print(f"    🔄 Removing existing tree and rebuilding with {len(unique_item_ids)} Item-ID exclusion(s)")
-
-            # Remove the entire existing tree
-            try:
-                from GSD_tagtoppers import safe_remove_entire_listing_tree
-                safe_remove_entire_listing_tree(client, customer_id, str(ad_group_id))
-            except Exception as e:
-                print(f"    ⚠️ Warning during tree removal: {e}")
-
-            # Wait longer for deletion to be fully processed by Google Ads API
-            print(f"    ⏳ Waiting 5 seconds for deletion to complete...")
-            time.sleep(5)
-
-            # Rebuild from scratch with all Item-ID exclusions, preserving all custom label structures
-            _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, unique_item_ids, default_bid_micros, custom_label_structures=custom_label_structures)
-
-            print(f"    ✅ Tree rebuilt successfully")
-            # Mark as processed and exit - we've handled the entire ad group
-            subdivisions_processed += 1
-            break  # No need to process other subdivisions, we rebuilt the entire tree
-
-        elif has_positive_non_item_id_unit_children:
-            # Case 3: Has POSITIVE non-Item-ID UNIT children
-            # Check if this is a multi-label structure (multiple label subdivisions at depth 1)
-            # or a single-label structure with nested custom labels
-
-            # Count label subdivisions at depth 1
-            depth_1_label_subs = [res for res in lowest_subdivisions if depth_map.get(res) == 1]
-
-            if len(depth_1_label_subs) > 1:
-                # PATTERN 2: Multiple label subdivisions (e.g., no data, invld_ean, nd_c, nd_cr)
-                # Just add Item-ID exclusions to each subdivision, no rebuild needed
-                print(f"    Detected multi-label structure with {len(depth_1_label_subs)} label subdivisions")
-                print(f"    Adding Item-ID exclusions to each subdivision without rebuilding tree")
-
-                # For each label subdivision, add Item-ID exclusions
-                for label_sub_res in depth_1_label_subs:
-                    print(f"    Processing label subdivision: {label_sub_res}")
-                    _add_item_id_exclusions_to_subdivision(
-                        client, customer_id, ad_group_id, agc_service,
-                        label_sub_res, unique_item_ids, default_bid_micros,
-                        skip_others=True  # OTHERS unit already exists
-                    )
-                    subdivisions_processed += 1
-
-                print(f"    ✅ Added Item-ID exclusions to {len(depth_1_label_subs)} label subdivision(s)")
-                break  # Done processing all subdivisions
-
+                if dim_type == "product_item_id":
+                    # This is an Item ID child
+                    try:
+                        item_id_value = case_val.product_item_id.value
+                        if not item_id_value:
+                            # Item ID OTHERS (no value set)
+                            has_item_id_others = True
+                        else:
+                            # Specific Item ID (has value)
+                            if child_node['negative']:
+                                has_item_id_exclusions = True
+                    except:
+                        # If we can't read the value, assume it's OTHERS
+                        has_item_id_others = True
+                else:
+                    # Non-Item ID unit (could be custom label OTHERS, etc.)
+                    if child_node['type'] == 'UNIT':
+                        has_non_item_id_units = True
             else:
-                # PATTERN 1: Single label with nested structure (e.g., custom label exclusions)
-                # Need to rebuild tree to preserve nested structures
-                print(f"    Has POSITIVE non-Item-ID UNIT children in single-label structure")
-                print(f"    🔄 Removing existing tree and rebuilding with {len(unique_item_ids)} Item-ID exclusion(s)")
+                # No case_value - this is likely an OTHERS case
+                # Check if it's a UNIT with positive targeting (not negative)
+                if child_node['type'] == 'UNIT' and not child_node['negative']:
+                    # This is an OTHERS unit (Item-ID OTHERS most likely)
+                    has_item_id_others = True
+                elif child_node['type'] == 'UNIT':
+                    has_non_item_id_units = True
 
-                # Remove the entire existing tree
-                try:
-                    from GSD_tagtoppers import safe_remove_entire_listing_tree
-                    safe_remove_entire_listing_tree(client, customer_id, str(ad_group_id))
-                except Exception as e:
-                    print(f"    ⚠️ Warning during tree removal: {e}")
+        # Decision logic based on what exists
+        if has_item_id_others:
+            # Item ID OTHERS exists - just add new exclusions
+            print(f"    Item-ID OTHERS already exists, adding new exclusions")
+            _add_item_id_exclusions_to_subdivision(
+                client, customer_id, ad_group_id, agc_service,
+                sub_res_name, unique_item_ids, default_bid_micros,
+                skip_others=True  # OTHERS already exists
+            )
+            subdivisions_processed += 1
 
-                # Wait longer for deletion to be fully processed by Google Ads API
-                print(f"    ⏳ Waiting 5 seconds for deletion to complete...")
-                time.sleep(5)
+        elif has_non_item_id_units:
+            # Has other units but no Item ID structure yet
+            # Add Item ID OTHERS + exclusions
+            print(f"    No Item-ID structure found, adding Item-ID OTHERS + exclusions")
+            _add_item_id_exclusions_to_subdivision(
+                client, customer_id, ad_group_id, agc_service,
+                sub_res_name, unique_item_ids, default_bid_micros,
+                skip_others=False  # Need to create OTHERS
+            )
+            subdivisions_processed += 1
 
-                # Rebuild from scratch with all Item-ID exclusions, preserving all custom label structures
-                _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, unique_item_ids, default_bid_micros, custom_label_structures=custom_label_structures)
-
-                print(f"    ✅ Tree rebuilt successfully")
-                # Mark as processed and exit - we've handled the entire ad group
-                subdivisions_processed += 1
-                break  # No need to process other subdivisions, we rebuilt the entire tree
-
-        elif has_non_item_id_subdivision_children:
-            # Case 4: Has non-Item-ID SUBDIVISION children - these are deeper, recurse or skip
-            print(f"    Has non-Item-ID SUBDIVISION children - these are deeper levels")
-            print(f"    ⚠️ This subdivision is not actually the lowest level, skipping")
+        else:
+            # No relevant children - add Item ID structure
+            print(f"    Adding Item-ID structure")
+            _add_item_id_exclusions_to_subdivision(
+                client, customer_id, ad_group_id, agc_service,
+                sub_res_name, unique_item_ids, default_bid_micros,
+                skip_others=False
+            )
+            subdivisions_processed += 1
 
     unique_count = len(unique_item_ids)
     total_count = len(item_ids)
