@@ -490,12 +490,18 @@ def _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, it
                 op.remove = root.ad_group_criterion.resource_name
                 agc_service.mutate_ad_group_criteria(customer_id=customer_id, operations=[op])
                 print(f"    Tree removed successfully")
+                # Wait for deletion to propagate
+                print(f"    ⏳ Waiting 5 seconds for deletion to propagate...")
+                time.sleep(5)
             else:
                 print(f"    No root found in existing tree")
         else:
             print(f"    No existing tree found")
     except Exception as e:
         print(f"    ⚠️ Error during tree removal check: {e}")
+        # Wait even if removal failed (tree might already be gone)
+        print(f"    ⏳ Waiting 3 seconds before proceeding...")
+        time.sleep(3)
 
     # Initialize custom_label_structures if None
     if custom_label_structures is None:
