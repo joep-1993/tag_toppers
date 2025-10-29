@@ -67,8 +67,8 @@ def rebuild_tree_with_label_and_item_ids(
 
     if not results:
         print("ℹ️ No existing tree found. Creating new tree structure.")
-        # Fall back to creating standard tree (with promo exclusion by default)
-        _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, item_ids, default_bid_micros, has_promo=True)
+        # Fall back to creating standard tree (with default promo exclusion)
+        _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, item_ids, default_bid_micros, custom_label_structures=[{'index': 'INDEX1', 'value': 'promo', 'negative': True, 'bid_micros': None}])
         return
 
     # Step 2: Build tree structure map and find lowest subdivision level
@@ -126,20 +126,35 @@ def rebuild_tree_with_label_and_item_ids(
 
     print(f"Found {len(lowest_subdivisions)} subdivision(s) at lowest level (depth {max_depth})")
 
-    # Check if original tree has "promo" exclusion
-    has_promo_exclusion = False
+    # Collect ALL custom label structures from the original tree (both exclusions and subdivisions)
+    custom_label_structures = []
     for res_name, node in tree_map.items():
         case_val = node['case_value']
         if (case_val and
-            case_val._pb.WhichOneof("dimension") == "product_custom_attribute" and
-            case_val.product_custom_attribute.index.name == "INDEX1" and
-            case_val.product_custom_attribute.value == "promo" and
-            node['negative']):
-            has_promo_exclusion = True
-            break
+            case_val._pb.WhichOneof("dimension") == "product_custom_attribute"):
+            index_name = case_val.product_custom_attribute.index.name
+            value = case_val.product_custom_attribute.value
 
-    if has_promo_exclusion:
-        print(f"    ℹ️ Original tree has 'promo' exclusion, will preserve it")
+            # Skip the label itself (INDEX0 with the keep_label_value) and OTHERS cases
+            if index_name == 'INDEX0':
+                continue
+            if not value or value == '':  # OTHERS case
+                continue
+
+            # Store all custom label units (both negative and positive)
+            if node['type'] == 'UNIT':
+                custom_label_structures.append({
+                    'index': index_name,
+                    'value': value,
+                    'negative': node['negative'],
+                    'bid_micros': node['bid_micros']
+                })
+
+    if custom_label_structures:
+        print(f"    ℹ️ Original tree has {len(custom_label_structures)} custom label structure(s), will preserve them:")
+        for struct in custom_label_structures:
+            neg_str = "[NEGATIVE]" if struct['negative'] else "[POSITIVE]"
+            print(f"       - {struct['index']}: '{struct['value']}' {neg_str}")
 
     # Step 3: For each lowest subdivision, add Item-ID exclusions
     agc_service = client.get_service("AdGroupCriterionService")
@@ -174,7 +189,7 @@ def rebuild_tree_with_label_and_item_ids(
 
         # Check what type of children exist
         has_item_id_children = False
-        has_non_item_id_unit_children = False
+        has_positive_non_item_id_unit_children = False
         has_non_item_id_subdivision_children = False
 
         for child_res in children:
@@ -183,8 +198,10 @@ def rebuild_tree_with_label_and_item_ids(
 
             if case_val and case_val._pb.WhichOneof("dimension") == "product_item_id":
                 has_item_id_children = True
-            elif child_node['type'] == 'UNIT':
-                has_non_item_id_unit_children = True
+            elif child_node['type'] == 'UNIT' and not child_node['negative']:
+                # Only count POSITIVE (non-negative) units as needing special handling
+                # NEGATIVE units are exclusions and should be left as siblings
+                has_positive_non_item_id_unit_children = True
             elif child_node['type'] == 'SUBDIVISION':
                 has_non_item_id_subdivision_children = True
 
@@ -197,39 +214,39 @@ def rebuild_tree_with_label_and_item_ids(
             try:
                 from GSD_tagtoppers import safe_remove_entire_listing_tree
                 safe_remove_entire_listing_tree(client, customer_id, str(ad_group_id))
-            except:
-                pass
+            except Exception as e:
+                print(f"    ⚠️ Warning during tree removal: {e}")
 
-            # Wait for deletion to be fully processed by Google Ads API
-            print(f"    ⏳ Waiting 3 seconds for deletion to complete...")
-            time.sleep(3)
+            # Wait longer for deletion to be fully processed by Google Ads API
+            print(f"    ⏳ Waiting 5 seconds for deletion to complete...")
+            time.sleep(5)
 
-            # Rebuild from scratch with all Item-ID exclusions, preserving promo if it existed
-            _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, unique_item_ids, default_bid_micros, has_promo=has_promo_exclusion)
+            # Rebuild from scratch with all Item-ID exclusions, preserving all custom label structures
+            _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, unique_item_ids, default_bid_micros, custom_label_structures=custom_label_structures)
 
             print(f"    ✅ Tree rebuilt successfully")
             # Mark as processed and exit - we've handled the entire ad group
             subdivisions_processed += 1
             break  # No need to process other subdivisions, we rebuilt the entire tree
 
-        elif has_non_item_id_unit_children:
-            # Case 3: Has non-Item-ID UNIT children - need to rebuild tree from scratch
-            print(f"    Has non-Item-ID UNIT children, rebuilding entire tree")
+        elif has_positive_non_item_id_unit_children:
+            # Case 3: Has POSITIVE non-Item-ID UNIT children - need to rebuild tree from scratch
+            print(f"    Has POSITIVE non-Item-ID UNIT children, rebuilding entire tree to preserve structures")
             print(f"    🔄 Removing existing tree and rebuilding with {len(unique_item_ids)} Item-ID exclusion(s)")
 
             # Remove the entire existing tree
             try:
                 from GSD_tagtoppers import safe_remove_entire_listing_tree
                 safe_remove_entire_listing_tree(client, customer_id, str(ad_group_id))
-            except:
-                pass
+            except Exception as e:
+                print(f"    ⚠️ Warning during tree removal: {e}")
 
-            # Wait for deletion to be fully processed by Google Ads API
-            print(f"    ⏳ Waiting 3 seconds for deletion to complete...")
-            time.sleep(3)
+            # Wait longer for deletion to be fully processed by Google Ads API
+            print(f"    ⏳ Waiting 5 seconds for deletion to complete...")
+            time.sleep(5)
 
-            # Rebuild from scratch with all Item-ID exclusions, preserving promo if it existed
-            _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, unique_item_ids, default_bid_micros, has_promo=has_promo_exclusion)
+            # Rebuild from scratch with all Item-ID exclusions, preserving all custom label structures
+            _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, unique_item_ids, default_bid_micros, custom_label_structures=custom_label_structures)
 
             print(f"    ✅ Tree rebuilt successfully")
             # Mark as processed and exit - we've handled the entire ad group
@@ -424,25 +441,87 @@ def _create_listing_group_unit_biddable(
     return operation
 
 
-def _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, item_ids, default_bid_micros, has_promo=True):
+def _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, item_ids, default_bid_micros, custom_label_structures=None):
     """
-    Creates standard tree structure when no existing tree is found:
+    Creates standard tree structure when no existing tree is found or needs to be rebuilt:
     Root SUBDIVISION
     ├─ Custom Attr 0 OTHERS [NEGATIVE] → Blocks everything without the label
-    ├─ Custom Attr 0 = <label> [SUBDIVISION]
-    │  ├─ Custom Attr 1 OTHERS [SUBDIVISION]
-    │  │  ├─ Item ID OTHERS [POSITIVE, biddable] → Show all items with the label
-    │  │  └─ Specific Item IDs [NEGATIVE] → Block unwanted items
-    │  └─ Custom Attr 1 = "promo" [NEGATIVE] → Block promo items (only if has_promo=True)
+    └─ Custom Attr 0 = <label> [SUBDIVISION]
+       ├─ Custom Attr X OTHERS [SUBDIVISION] → Subdivision for the highest custom label index
+       │  ├─ Item ID OTHERS [POSITIVE, biddable] → Show all items with this custom label
+       │  └─ Specific Item IDs [NEGATIVE] → Block unwanted items
+       └─ Custom Attr X = <value> [SUBDIVISION/UNIT] → Preserved custom label structures (both positive and negative)
+          ├─ Item ID OTHERS [POSITIVE, biddable] (if positive)
+          └─ Specific Item IDs [NEGATIVE] (if positive)
+
+    Args:
+        custom_label_structures: List of dicts with 'index', 'value', 'negative', and 'bid_micros' for custom label structures to preserve
     """
     import time
 
-    # Import safe_remove_entire_listing_tree if available
+    # Remove existing tree directly
+    print(f"    Checking for existing tree to remove...")
+    ag_service = client.get_service("AdGroupService")
+    agc_service = client.get_service("AdGroupCriterionService")
+    ga_service = client.get_service("GoogleAdsService")
+    ag_path = ag_service.ad_group_path(customer_id, str(ad_group_id))
+
+    query = f"""
+        SELECT ad_group_criterion.resource_name,
+               ad_group_criterion.listing_group.parent_ad_group_criterion
+        FROM ad_group_criterion
+        WHERE ad_group_criterion.ad_group = '{ag_path}'
+          AND ad_group_criterion.type = 'LISTING_GROUP'
+    """
+
     try:
-        from GSD_tagtoppers import safe_remove_entire_listing_tree
-        safe_remove_entire_listing_tree(client, customer_id, str(ad_group_id))
-    except:
-        pass
+        existing_criteria = list(ga_service.search(customer_id=customer_id, query=query))
+        if existing_criteria:
+            # Find root (no parent)
+            root = None
+            for row in existing_criteria:
+                if not row.ad_group_criterion.listing_group.parent_ad_group_criterion:
+                    root = row
+                    break
+
+            if root:
+                print(f"    Removing existing tree (root: {root.ad_group_criterion.resource_name})...")
+                op = client.get_type("AdGroupCriterionOperation")
+                op.remove = root.ad_group_criterion.resource_name
+                agc_service.mutate_ad_group_criteria(customer_id=customer_id, operations=[op])
+                print(f"    Tree removed successfully")
+            else:
+                print(f"    No root found in existing tree")
+        else:
+            print(f"    No existing tree found")
+    except Exception as e:
+        print(f"    ⚠️ Error during tree removal check: {e}")
+
+    # Initialize custom_label_structures if None
+    if custom_label_structures is None:
+        custom_label_structures = []
+
+    # Map index names to enum values
+    index_map = {
+        'INDEX0': client.enums.ProductCustomAttributeIndexEnum.INDEX0,
+        'INDEX1': client.enums.ProductCustomAttributeIndexEnum.INDEX1,
+        'INDEX2': client.enums.ProductCustomAttributeIndexEnum.INDEX2,
+        'INDEX3': client.enums.ProductCustomAttributeIndexEnum.INDEX3,
+        'INDEX4': client.enums.ProductCustomAttributeIndexEnum.INDEX4,
+    }
+
+    # Separate positive and negative custom label structures
+    positive_structures = [s for s in custom_label_structures if not s['negative']]
+    negative_structures = [s for s in custom_label_structures if s['negative']]
+
+    # Find the highest custom label index (for creating OTHERS subdivisions)
+    highest_index_num = 1  # Default to INDEX1 for backward compatibility
+    for struct in custom_label_structures:
+        index_name = struct['index']
+        if index_name in index_map:
+            index_num = int(index_name[-1])  # Extract number from 'INDEXN'
+            if index_num > highest_index_num:
+                highest_index_num = index_num
 
     agc = client.get_service("AdGroupCriterionService")
     product_custom_enum = client.enums.ProductCustomAttributeIndexEnum
@@ -510,9 +589,10 @@ def _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, it
     root_actual = resp1.results[0].resource_name
     time.sleep(0.5)
 
-    # MUTATE 2: Label subdivision + Custom Attr 1 OTHERS subdivision + Item ID OTHERS unit
+    # MUTATE 2: Label subdivision + chain of Custom Attr OTHERS subdivisions + Item ID OTHERS unit
     ops2 = []
 
+    # Create label subdivision under root
     dim_label = client.get_type("ListingDimensionInfo")
     dim_label.product_custom_attribute.index = product_custom_enum.INDEX0
     dim_label.product_custom_attribute.value = keep_label_value
@@ -520,59 +600,133 @@ def _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, it
     label_sub_tmp = label_sub_op.create.resource_name
     ops2.append(label_sub_op)
 
-    dim_attr1_others = client.get_type("ListingDimensionInfo")
+    # Create OTHERS subdivision for the highest custom label index only
+    # All custom label exclusions will be siblings to this OTHERS subdivision
+    index_enum = index_map[f'INDEX{highest_index_num}']
+
+    dim_attr_others = client.get_type("ListingDimensionInfo")
     client.copy_from(
-        dim_attr1_others.product_custom_attribute,
+        dim_attr_others.product_custom_attribute,
         client.get_type("ProductCustomAttributeInfo"),
     )
-    dim_attr1_others.product_custom_attribute.index = product_custom_enum.INDEX1
-    attr1_sub_op = create_listing_group_subdivision(label_sub_tmp, dim_attr1_others)
-    attr1_sub_tmp = attr1_sub_op.create.resource_name
-    ops2.append(attr1_sub_op)
+    dim_attr_others.product_custom_attribute.index = index_enum
 
+    attr_sub_op = create_listing_group_subdivision(label_sub_tmp, dim_attr_others)
+    attr_sub_tmp = attr_sub_op.create.resource_name
+    ops2.append(attr_sub_op)
+
+    # Track parent for adding exclusions - they should be siblings to OTHERS subdivision
+    # So their parent is the label subdivision
+    highest_others_tmp = attr_sub_tmp
+    exclusions_parent_tmp = label_sub_tmp
+
+    # Add Item ID OTHERS unit under the OTHERS subdivision
     dim_itemid_others = client.get_type("ListingDimensionInfo")
     client.copy_from(
         dim_itemid_others.product_item_id,
         client.get_type("ProductItemIdInfo"),
     )
-    ops2.append(create_unit(attr1_sub_tmp, dim_itemid_others, False, default_bid_micros))
+    ops2.append(create_unit(highest_others_tmp, dim_itemid_others, False, default_bid_micros))
 
     resp2 = agc.mutate_ad_group_criteria(customer_id=customer_id, operations=ops2)
     label_sub_actual = resp2.results[0].resource_name
-    attr1_sub_actual = resp2.results[1].resource_name
+    highest_others_actual = resp2.results[1].resource_name
+    exclusions_parent_actual = label_sub_actual
     time.sleep(0.5)
 
-    # MUTATE 3: Item ID exclusions + promo exclusion
-    ops3 = []
-
+    # MUTATE 3A: Add Item ID exclusions under the OTHERS subdivision
+    ops3a = []
     unique_item_ids = list(dict.fromkeys(item_ids)) if item_ids else []
 
     if unique_item_ids:
         for item_id in unique_item_ids:
             dim_item = client.get_type("ListingDimensionInfo")
             dim_item.product_item_id.value = str(item_id)
-            ops3.append(create_unit(attr1_sub_actual, dim_item, True, None))
+            ops3a.append(create_unit(highest_others_actual, dim_item, True, None))
 
-    # Only add promo exclusion if it was in the original tree
-    if has_promo:
-        dim_promo = client.get_type("ListingDimensionInfo")
-        dim_promo.product_custom_attribute.index = product_custom_enum.INDEX1
-        dim_promo.product_custom_attribute.value = "promo"
-        ops3.append(create_unit(label_sub_actual, dim_promo, True, None))
+    if ops3a:
+        agc.mutate_ad_group_criteria(customer_id=customer_id, operations=ops3a)
+        time.sleep(0.5)
 
-    if ops3:
-        agc.mutate_ad_group_criteria(customer_id=customer_id, operations=ops3)
-        unique_count = len(unique_item_ids)
-        total_count = len(item_ids) if item_ids else 0
+    # MUTATE 3B: Add custom label structures
+    # For positive structures: create as subdivisions with Item ID children sequentially
+    # For negative structures: create as exclusion units
 
-        promo_msg = " + 'promo' items" if has_promo else ""
+    # Create each positive structure as a subdivision with its Item ID children immediately
+    for struct in positive_structures:
+        index_name = struct['index']
+        value = struct['value']
 
-        if total_count > unique_count:
-            print(f"✅ Standard tree created: Allow label '{keep_label_value}', block {unique_count} unique Item IDs ({total_count-unique_count} duplicates removed){promo_msg}.")
-        else:
-            print(f"✅ Standard tree created: Allow label '{keep_label_value}', block {unique_count} Item IDs{promo_msg}.")
+        if index_name not in index_map:
+            print(f"⚠️ Unknown custom label index '{index_name}', skipping structure for value '{value}'")
+            continue
+
+        index_enum = index_map[index_name]
+
+        # Create custom label subdivision under the label subdivision (sibling to OTHERS)
+        dim_struct = client.get_type("ListingDimensionInfo")
+        dim_struct.product_custom_attribute.index = index_enum
+        dim_struct.product_custom_attribute.value = value
+        struct_sub_op = create_listing_group_subdivision(exclusions_parent_actual, dim_struct)
+
+        # Create subdivision
+        resp3b_sub = agc.mutate_ad_group_criteria(customer_id=customer_id, operations=[struct_sub_op])
+        struct_actual = resp3b_sub.results[0].resource_name
+        time.sleep(0.3)
+
+        # Immediately add Item ID OTHERS and Item ID exclusions as children
+        ops3b_children = []
+
+        # Add Item ID OTHERS (positive, with original bid)
+        dim_itemid_others = client.get_type("ListingDimensionInfo")
+        client.copy_from(
+            dim_itemid_others.product_item_id,
+            client.get_type("ProductItemIdInfo"),
+        )
+        ops3b_children.append(create_unit(struct_actual, dim_itemid_others, False, struct.get('bid_micros', default_bid_micros)))
+
+        # Add Item ID exclusions
+        if unique_item_ids:
+            for item_id in unique_item_ids:
+                dim_item = client.get_type("ListingDimensionInfo")
+                dim_item.product_item_id.value = str(item_id)
+                ops3b_children.append(create_unit(struct_actual, dim_item, True, None))
+
+        if ops3b_children:
+            agc.mutate_ad_group_criteria(customer_id=customer_id, operations=ops3b_children)
+            time.sleep(0.3)
+
+    # Finally, add negative structures as exclusion units (siblings to OTHERS)
+    ops3c_negatives = []
+    for struct in negative_structures:
+        index_name = struct['index']
+        value = struct['value']
+
+        if index_name not in index_map:
+            print(f"⚠️ Unknown custom label index '{index_name}', skipping exclusion for value '{value}'")
+            continue
+
+        index_enum = index_map[index_name]
+
+        # Create negative unit under the label subdivision (sibling to OTHERS)
+        dim_excl = client.get_type("ListingDimensionInfo")
+        dim_excl.product_custom_attribute.index = index_enum
+        dim_excl.product_custom_attribute.value = value
+        ops3c_negatives.append(create_unit(exclusions_parent_actual, dim_excl, True, None))
+
+    if ops3c_negatives:
+        agc.mutate_ad_group_criteria(customer_id=customer_id, operations=ops3c_negatives)
+
+    # Print success message
+    unique_count = len(unique_item_ids)
+    total_count = len(item_ids) if item_ids else 0
+    struct_msg = ""
+    if positive_structures:
+        struct_msg += f" + {len(positive_structures)} positive custom label structure(s)"
+    if negative_structures:
+        struct_msg += f" + {len(negative_structures)} negative custom label structure(s)"
+
+    if total_count > unique_count:
+        print(f"✅ Standard tree created: Allow label '{keep_label_value}', block {unique_count} unique Item IDs ({total_count-unique_count} duplicates removed){struct_msg}.")
     else:
-        if has_promo:
-            print(f"✅ Standard tree created: Allow label '{keep_label_value}', block 'promo' items.")
-        else:
-            print(f"✅ Standard tree created: Allow label '{keep_label_value}'.")
+        print(f"✅ Standard tree created: Allow label '{keep_label_value}', block {unique_count} Item IDs{struct_msg}.")

@@ -65,8 +65,12 @@ _Track important files and their purposes_
 _Add as you build_
 
 - `GSD_tagtoppers.py` - Main script for Google Shopping campaigns with exclusive Item-ID logic
-- `listing_tree.py` - Listing tree management functions for preserving and rebuilding product partition trees
+- `listing_tree.py` - Listing tree rebuild logic with custom label exclusion preservation - detects and preserves existing negative custom label units while adding item ID exclusions
 - `listing_tree_readme.md` - Documentation for listing tree rebuild logic
+
+### Test Files
+- `test_fixed_script.py` - Test script for verifying custom label exclusion preservation
+- `test_exclusion_preservation.py` - Alternative test script for tree rebuild validation
 
 ## Dependencies
 _Major libraries and frameworks_
@@ -84,4 +88,4 @@ _Important technical and architectural decisions_
 - Using Google OAuth for authentication
 
 ---
-_Last updated: 2025-10-28_
+_Last updated: 2025-10-29_

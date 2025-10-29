@@ -4,15 +4,13 @@ _Active task tracking. Update when: starting work, completing tasks, finding blo
 ## Current Sprint
 _Active tasks for immediate work_
 
-- [ ] Initial project setup #priority:high #estimate:2h
-- [ ] Define project requirements #priority:high #estimate:1h
-
 ## In Progress
 _Tasks currently being worked on_
 
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Fix custom label exclusion preservation in listing tree rebuild #claude-session:2025-10-29
 - [x] Fix listing tree rebuild logic to prevent LISTING_GROUP_ALREADY_EXISTS errors #claude-session:2025-10-28
 - [x] Add promo exclusion detection and conditional preservation #claude-session:2025-10-28
 - [x] Fix Proto-plus WhichOneof attribute access errors #claude-session:2025-10-28
