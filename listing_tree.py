@@ -230,28 +230,56 @@ def rebuild_tree_with_label_and_item_ids(
             break  # No need to process other subdivisions, we rebuilt the entire tree
 
         elif has_positive_non_item_id_unit_children:
-            # Case 3: Has POSITIVE non-Item-ID UNIT children - need to rebuild tree from scratch
-            print(f"    Has POSITIVE non-Item-ID UNIT children, rebuilding entire tree to preserve structures")
-            print(f"    🔄 Removing existing tree and rebuilding with {len(unique_item_ids)} Item-ID exclusion(s)")
+            # Case 3: Has POSITIVE non-Item-ID UNIT children
+            # Check if this is a multi-label structure (multiple label subdivisions at depth 1)
+            # or a single-label structure with nested custom labels
 
-            # Remove the entire existing tree
-            try:
-                from GSD_tagtoppers import safe_remove_entire_listing_tree
-                safe_remove_entire_listing_tree(client, customer_id, str(ad_group_id))
-            except Exception as e:
-                print(f"    ⚠️ Warning during tree removal: {e}")
+            # Count label subdivisions at depth 1
+            depth_1_label_subs = [res for res in lowest_subdivisions if depth_map.get(res) == 1]
 
-            # Wait longer for deletion to be fully processed by Google Ads API
-            print(f"    ⏳ Waiting 5 seconds for deletion to complete...")
-            time.sleep(5)
+            if len(depth_1_label_subs) > 1:
+                # PATTERN 2: Multiple label subdivisions (e.g., no data, invld_ean, nd_c, nd_cr)
+                # Just add Item-ID exclusions to each subdivision, no rebuild needed
+                print(f"    Detected multi-label structure with {len(depth_1_label_subs)} label subdivisions")
+                print(f"    Adding Item-ID exclusions to each subdivision without rebuilding tree")
 
-            # Rebuild from scratch with all Item-ID exclusions, preserving all custom label structures
-            _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, unique_item_ids, default_bid_micros, custom_label_structures=custom_label_structures)
+                # For each label subdivision, add Item-ID exclusions
+                for label_sub_res in depth_1_label_subs:
+                    print(f"    Processing label subdivision: {label_sub_res}")
+                    _add_item_id_exclusions_to_subdivision(
+                        client, customer_id, ad_group_id, agc_service,
+                        label_sub_res, unique_item_ids, default_bid_micros,
+                        skip_others=True  # OTHERS unit already exists
+                    )
+                    subdivisions_processed += 1
 
-            print(f"    ✅ Tree rebuilt successfully")
-            # Mark as processed and exit - we've handled the entire ad group
-            subdivisions_processed += 1
-            break  # No need to process other subdivisions, we rebuilt the entire tree
+                print(f"    ✅ Added Item-ID exclusions to {len(depth_1_label_subs)} label subdivision(s)")
+                break  # Done processing all subdivisions
+
+            else:
+                # PATTERN 1: Single label with nested structure (e.g., custom label exclusions)
+                # Need to rebuild tree to preserve nested structures
+                print(f"    Has POSITIVE non-Item-ID UNIT children in single-label structure")
+                print(f"    🔄 Removing existing tree and rebuilding with {len(unique_item_ids)} Item-ID exclusion(s)")
+
+                # Remove the entire existing tree
+                try:
+                    from GSD_tagtoppers import safe_remove_entire_listing_tree
+                    safe_remove_entire_listing_tree(client, customer_id, str(ad_group_id))
+                except Exception as e:
+                    print(f"    ⚠️ Warning during tree removal: {e}")
+
+                # Wait longer for deletion to be fully processed by Google Ads API
+                print(f"    ⏳ Waiting 5 seconds for deletion to complete...")
+                time.sleep(5)
+
+                # Rebuild from scratch with all Item-ID exclusions, preserving all custom label structures
+                _create_standard_tree(client, customer_id, ad_group_id, keep_label_value, unique_item_ids, default_bid_micros, custom_label_structures=custom_label_structures)
+
+                print(f"    ✅ Tree rebuilt successfully")
+                # Mark as processed and exit - we've handled the entire ad group
+                subdivisions_processed += 1
+                break  # No need to process other subdivisions, we rebuilt the entire tree
 
         elif has_non_item_id_subdivision_children:
             # Case 4: Has non-Item-ID SUBDIVISION children - these are deeper, recurse or skip
@@ -268,32 +296,37 @@ def rebuild_tree_with_label_and_item_ids(
 
 def _add_item_id_exclusions_to_subdivision(
     client, customer_id, ad_group_id, agc_service,
-    parent_res_name, unique_item_ids, default_bid_micros
+    parent_res_name, unique_item_ids, default_bid_micros,
+    skip_others=False
 ):
     """
     Adds Item-ID OTHERS (positive) and specific Item-ID exclusions (negative)
     to a subdivision node.
+
+    Args:
+        skip_others: If True, skip adding Item-ID OTHERS (it already exists)
     """
     operations = []
 
-    # Add Item ID OTHERS (positive, biddable)
-    dim_itemid_others = client.get_type("ListingDimensionInfo")
-    client.copy_from(
-        dim_itemid_others.product_item_id,
-        client.get_type("ProductItemIdInfo"),
-    )
-
-    operations.append(
-        _create_listing_group_unit_biddable(
-            client=client,
-            customer_id=customer_id,
-            ad_group_id=str(ad_group_id),
-            parent_ad_group_criterion_resource_name=parent_res_name,
-            listing_dimension_info=dim_itemid_others,
-            targeting_negative=False,
-            cpc_bid_micros=default_bid_micros
+    # Add Item ID OTHERS (positive, biddable) - only if it doesn't exist yet
+    if not skip_others:
+        dim_itemid_others = client.get_type("ListingDimensionInfo")
+        client.copy_from(
+            dim_itemid_others.product_item_id,
+            client.get_type("ProductItemIdInfo"),
         )
-    )
+
+        operations.append(
+            _create_listing_group_unit_biddable(
+                client=client,
+                customer_id=customer_id,
+                ad_group_id=str(ad_group_id),
+                parent_ad_group_criterion_resource_name=parent_res_name,
+                listing_dimension_info=dim_itemid_others,
+                targeting_negative=False,
+                cpc_bid_micros=default_bid_micros
+            )
+        )
 
     # Add specific Item IDs as NEGATIVE units
     if unique_item_ids:
@@ -313,9 +346,16 @@ def _add_item_id_exclusions_to_subdivision(
             )
 
     # Execute operations
+    if not operations:
+        print(f"    ⚠️ No operations to execute (all items may already exist)")
+        return
+
     try:
         agc_service.mutate_ad_group_criteria(customer_id=customer_id, operations=operations)
-        print(f"    ✅ Added Item-ID OTHERS + {len(unique_item_ids)} exclusion(s)")
+        if skip_others:
+            print(f"      ✅ Added {len(unique_item_ids)} Item-ID exclusion(s)")
+        else:
+            print(f"      ✅ Added Item-ID OTHERS + {len(unique_item_ids)} exclusion(s)")
     except Exception as e:
         print(f"    ❌ Error adding Item-ID exclusions: {e}")
         raise
