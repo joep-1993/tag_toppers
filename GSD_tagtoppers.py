@@ -662,7 +662,7 @@ def mark_rows_as_processed(
         })
 
     body = {
-        "valueInputOption": "RAW",
+        "valueInputOption": "USER_ENTERED",  # Let Sheets interpret TRUE as boolean
         "data": data
     }
 
