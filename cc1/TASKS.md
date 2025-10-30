@@ -10,6 +10,7 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Fix multiple subdivision tree rebuild overwriting issue - batch atomic rebuild #claude-session:2025-10-30
 - [x] Fix Item-ID OTHERS detection for multi-label trees #claude-session:2025-10-30
 - [x] Fix custom label exclusion preservation in listing tree rebuild #claude-session:2025-10-29
 - [x] Fix listing tree rebuild logic to prevent LISTING_GROUP_ALREADY_EXISTS errors #claude-session:2025-10-28

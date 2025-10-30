@@ -65,12 +65,13 @@ _Track important files and their purposes_
 _Add as you build_
 
 - `GSD_tagtoppers.py` - Main script for Google Shopping campaigns with exclusive Item-ID logic
-- `listing_tree.py` - Listing tree rebuild logic with universal terminal subdivision detection - handles both single-label and multi-label structures, correctly detects existing Item-ID OTHERS (including POSITIVE UNITS with no case_value), preserves custom label exclusions
+- `listing_tree.py` - Listing tree rebuild logic with batch subdivision processing - collects all targets needing conversion and processes in single atomic rebuild to prevent overwriting. Includes universal terminal subdivision detection, invalid case_value fallback handling, and custom label exclusion preservation. Handles both single-label and multi-label structures.
 - `listing_tree_readme.md` - Documentation for listing tree rebuild logic
 
 ### Test Files
 - `test_fixed_script.py` - Test script for verifying custom label exclusion preservation
 - `test_exclusion_preservation.py` - Alternative test script for tree rebuild validation
+- `test_fix.py` - Test script for verifying batch subdivision processing (multiple subdivisions processed in single tree rebuild)
 
 ## Dependencies
 _Major libraries and frameworks_

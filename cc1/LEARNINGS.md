@@ -152,3 +152,63 @@ _Session: 2025-10-28_
 - **Test**: Add 3 new test Item-ID exclusions to verify no LISTING_GROUP_ALREADY_EXISTS error
 - **Result**: Successfully added 9 exclusions total (3 to each subdivision) without errors
 - **Verification**: Tree grew from 11 to 20 nodes, all Item-ID OTHERS correctly detected and preserved
+
+##### Atomic Tree Rebuild Problem (2025-10-30)
+- **Problem**: When multiple subdivisions need UNIT-to-SUBDIVISION conversion, processing them sequentially causes each rebuild to overwrite previous changes
+- **Root Cause**: `_convert_unit_to_subdivision_atomic()` removes ENTIRE tree (all nodes) and recreates from scratch. Second rebuild overwrites first rebuild's changes.
+- **Example**: 3 subdivisions needing conversion:
+  - Rebuild 1: Removes 14 nodes, creates 175 nodes (subdivision 1 has Item-IDs) ✓
+  - Rebuild 2: Removes 175 nodes, creates 175 nodes (subdivision 2 has Item-IDs, subdivision 1 LOST) ✗
+  - Rebuild 3: Fails with CONCURRENT_MODIFICATION error
+  - Result: Only subdivision 2 has Item-IDs, subdivisions 1 and 3 are missing them
+- **Solution**: Collect all subdivisions needing conversion in first pass, then process ALL in single tree rebuild
+- **Implementation**: Two-pass approach:
+  ```python
+  # FIRST PASS: Collect all targets
+  subdivisions_needing_rebuild = []
+  for sub_res_name in target_subdivisions:
+      if needs_rebuild(sub_res_name):
+          subdivisions_needing_rebuild.append({
+              'res_name': sub_res_name,
+              'non_item_id_others_unit': unit_data,
+              'children': children
+          })
+
+  # SECOND PASS: Single atomic rebuild for all
+  if subdivisions_needing_rebuild:
+      _convert_unit_to_subdivision_atomic(
+          client, customer_id, ad_group_id, agc_service,
+          subdivisions_needing_rebuild,  # Pass ALL targets
+          unique_item_ids, default_bid_micros,
+          tree_map, custom_label_structures
+      )
+  ```
+- **Code Locations**: listing_tree.py:200-273 (collection), listing_tree.py:678-942 (atomic rebuild)
+
+### Batch Tree Operations Pattern (2025-10-30)
+- **Pattern**: When modifying multiple nodes requiring tree rebuild, collect all targets first, then apply all changes in single atomic operation
+- **Why Needed**: Sequential tree rebuilds overwrite each other because each rebuild removes+recreates entire tree
+- **Benefits**:
+  - Prevents data loss from sequential rebuilds
+  - More efficient (single API operation instead of multiple)
+  - Avoids CONCURRENT_MODIFICATION errors
+- **Use Cases**:
+  - Adding Item-ID level to multiple subdivisions simultaneously
+  - Bulk tree structure modifications
+  - Any operation requiring multiple UNIT-to-SUBDIVISION conversions
+- **Anti-Pattern**: Processing targets in loop with individual tree rebuilds
+
+##### Invalid Case Value Fallback (2025-10-30)
+- **Problem**: Nodes with missing or invalid case_value cause validation errors during tree rebuild
+- **Symptom**: Nodes show as "ROOT" dimension in queries but have no actual case_value set
+- **Solution**: Added fallback to detect and fix nodes without case_value:
+  ```python
+  # Detect nodes with no case_value
+  elif not node.get('case_value'):
+      # Set Item-ID OTHERS as fallback to avoid validation error
+      empty_item_id = client.get_type("ProductItemIdInfo")
+      criterion.listing_group.case_value.product_item_id._pb.MergeFrom(empty_item_id._pb)
+      print(f"⚠️ WARNING: Node {node['temp_id']} has no case_value, defaulting to Item-ID OTHERS")
+  ```
+- **Code Location**: listing_tree.py:950-961
+- **Prevention**: This handles corrupted tree data gracefully during rebuild
