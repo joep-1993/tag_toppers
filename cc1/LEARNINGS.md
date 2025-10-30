@@ -212,3 +212,63 @@ _Session: 2025-10-28_
   ```
 - **Code Location**: listing_tree.py:950-961
 - **Prevention**: This handles corrupted tree data gracefully during rebuild
+
+##### Credential Loading from File (2025-10-30)
+- **Problem**: `ValueError: The specified login customer ID is invalid` - environment variables not set in Windows environment
+- **Root Cause**: Script only loaded CLIENT_ID and CLIENT_SECRET from creds file, other credentials required env vars
+- **Solution**: Update credential loading to read all 5 required credentials from creds file:
+  - GOOGLE_CLIENT_ID
+  - GOOGLE_CLIENT_SECRET
+  - GOOGLE_REFRESH_TOKEN
+  - GOOGLE_DEVELOPER_TOKEN
+  - GOOGLE_LOGIN_CUSTOMER_ID
+- **Implementation**: Single `load_google_credentials()` function that tries env vars first, then reads from creds file
+- **Code Location**: GSD_tagtoppers.py:36-80
+- **Pattern**: Always provide file-based fallback for credentials in cross-platform environments
+
+##### Bidding Restrictions (2025-10-30)
+- **Error**: `CANNOT_SET_BIDS_ON_LISTING_GROUP_SUBDIVISION` - cannot set bids on subdivision nodes
+- **Cause**: Google Ads API only allows bids on UNIT (leaf) nodes, not SUBDIVISION nodes
+- **Solution**: Check node type before setting bid:
+  ```python
+  # Set bid (only for UNIT nodes - subdivisions cannot have bids)
+  if node.get('bid_micros') and node['type'] == 'UNIT':
+      criterion.cpc_bid_micros = node['bid_micros']
+  ```
+- **Code Location**: listing_tree.py:938-940
+- **Key Rule**: Never attempt to set `cpc_bid_micros` on SUBDIVISION nodes
+
+##### Campaign Structure Types (2025-10-30)
+- **Two Tree Structures**: Tag_toppers campaigns use different tree structure than label-based campaigns
+- **Label-Based Campaigns**: Use EXCLUSION logic (block specific Item-IDs from showing)
+  - Labels: a, b, c, no data, no ean
+  - Function: `rebuild_tree_with_label_and_item_ids()`
+  - Structure: Custom Label subdivisions → Item-ID OTHERS (positive) + Item-ID exclusions (negative)
+- **Tag_Toppers Campaigns**: Use INCLUSION logic (only show specific Item-IDs)
+  - Label: tag_toppers
+  - Function: `rebuild_tree_with_specific_item_ids()`
+  - Structure: Root → Item-ID OTHERS (negative) + Specific Item-IDs (positive)
+- **Important**: Never apply label-based tree logic to tag_toppers campaigns and vice versa
+- **Detection**: Check campaign name for 'label:tag_toppers' to determine structure type
+- **Code Location**: GSD_tagtoppers.py:990-993
+
+##### Non-Critical Error Handling (2025-10-30)
+- **Pattern**: Distinguish between critical and non-critical Google Ads API errors
+- **Use Case**: `LISTING_GROUP_ALREADY_EXISTS` errors should not prevent marking rows as processed
+- **Implementation**:
+  ```python
+  except GoogleAdsException as ex:
+      is_duplicate_error = any(
+          hasattr(e.error_code, 'criterion_error') and
+          e.error_code.criterion_error.name == 'LISTING_GROUP_ALREADY_EXISTS'
+          for e in ex.failure.errors
+      )
+      if is_duplicate_error:
+          print(f"⚠️ Warning: Some listings already exist (non-critical)")
+          # Continue as success
+      else:
+          print(f"❌ Error: {ex.failure}")
+          row_processed_successfully = False
+  ```
+- **Code Location**: GSD_tagtoppers.py:1006-1016, 1030-1040
+- **Benefits**: Allows script to handle idempotency gracefully
