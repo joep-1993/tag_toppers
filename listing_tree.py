@@ -210,7 +210,7 @@ def rebuild_tree_with_label_and_item_ids(
         # Check what type of children exist
         has_item_id_others = False
         has_non_item_id_units = False
-        non_item_id_others_unit = None
+        positive_non_item_id_units = []  # Collect ALL positive units to convert
 
         for child_res in children:
             child_node = tree_map[child_res]
@@ -230,16 +230,14 @@ def rebuild_tree_with_label_and_item_ids(
                 elif dim_type == "product_custom_attribute":
                     if child_node['type'] == 'UNIT':
                         has_non_item_id_units = True
-                        try:
-                            attr_value = case_val.product_custom_attribute.value
-                            if not attr_value and not child_node['negative']:
-                                non_item_id_others_unit = {
-                                    'res_name': child_res,
-                                    'case_value': case_val,
-                                    'bid_micros': child_node['bid_micros']
-                                }
-                        except:
-                            pass
+                        # Collect POSITIVE (non-negative) units for conversion
+                        # This includes both OTHERS and VALUE units
+                        if not child_node['negative']:
+                            positive_non_item_id_units.append({
+                                'res_name': child_res,
+                                'case_value': case_val,
+                                'bid_micros': child_node['bid_micros']
+                            })
                 else:
                     if child_node['type'] == 'UNIT':
                         has_non_item_id_units = True
@@ -250,10 +248,11 @@ def rebuild_tree_with_label_and_item_ids(
                     has_non_item_id_units = True
 
         # If this subdivision needs UNIT-to-SUBDIVISION conversion, collect it
-        if has_non_item_id_units and non_item_id_others_unit and not has_item_id_others:
+        # Need: positive non-Item-ID units AND no existing Item-ID level
+        if has_non_item_id_units and positive_non_item_id_units and not has_item_id_others:
             subdivisions_needing_rebuild.append({
                 'res_name': sub_res_name,
-                'non_item_id_others_unit': non_item_id_others_unit,
+                'positive_units_to_convert': positive_non_item_id_units,  # All positive units
                 'children': children
             })
 
@@ -737,9 +736,9 @@ def _convert_unit_to_subdivision_atomic(
             target_data = target_subdivisions_map[res_name]
             print(f"         Found target subdivision: {res_name}, rebuilding with Item-ID level")
 
-            # Find Custom Label OTHERS UNIT and exclusions
-            custom_label_others = None
-            custom_label_exclusions = []
+            # Separate children into positive units (to convert) and negative units (to preserve)
+            positive_custom_label_units = []
+            negative_custom_label_units = []
 
             for child_res in tree_map[res_name]['children']:
                 child_node = tree_map[child_res]
@@ -748,14 +747,15 @@ def _convert_unit_to_subdivision_atomic(
                 if case_val:
                     dim_type = case_val._pb.WhichOneof("dimension")
                     if dim_type == "product_custom_attribute":
-                        attr_value = case_val.product_custom_attribute.value
-                        if not attr_value and not child_node['negative']:
-                            custom_label_others = child_node
-                        elif attr_value:
-                            custom_label_exclusions.append(child_node)
+                        if child_node['negative']:
+                            # Keep negative units as exclusions
+                            negative_custom_label_units.append(child_node)
+                        else:
+                            # Convert positive units to subdivisions
+                            positive_custom_label_units.append(child_node)
 
-            # Build Custom Label OTHERS as SUBDIVISION with Item-ID children
-            if custom_label_others:
+            # Convert each positive Custom Label UNIT to SUBDIVISION with Item-ID children
+            for positive_unit in positive_custom_label_units:
                 cl_sub_temp_id = temp_id_counter_ref[0]
                 temp_id_counter_ref[0] -= 1
 
@@ -764,14 +764,14 @@ def _convert_unit_to_subdivision_atomic(
                     'temp_res': f"customers/{customer_id}/adGroupCriteria/{ad_group_id}~{cl_sub_temp_id}",
                     'parent_temp_res': new_node['temp_res'],
                     'type': 'SUBDIVISION',
-                    'case_value': custom_label_others['case_value'],
+                    'case_value': positive_unit['case_value'],
                     'negative': False,
                     # Don't set bid_micros for SUBDIVISION nodes - only UNITs can have bids
                     'children': []
                 }
                 new_node['children'].append(cl_subdivision)
 
-                # Add Item-ID OTHERS under it
+                # Add Item-ID OTHERS under it (use original bid from the unit)
                 item_id_others_temp_id = temp_id_counter_ref[0]
                 temp_id_counter_ref[0] -= 1
 
@@ -783,7 +783,7 @@ def _convert_unit_to_subdivision_atomic(
                     'case_value_type': 'product_item_id',
                     'case_value_value': None,
                     'negative': False,
-                    'bid_micros': default_bid_micros,
+                    'bid_micros': positive_unit.get('bid_micros', default_bid_micros),
                     'children': []
                 }
                 cl_subdivision['children'].append(item_id_others)
@@ -806,8 +806,8 @@ def _convert_unit_to_subdivision_atomic(
                     }
                     cl_subdivision['children'].append(item_id_excl)
 
-            # Re-add Custom Label exclusions as siblings
-            for excl_node in custom_label_exclusions:
+            # Re-add negative Custom Label units as siblings (exclusions)
+            for negative_unit in negative_custom_label_units:
                 excl_temp_id = temp_id_counter_ref[0]
                 temp_id_counter_ref[0] -= 1
 
@@ -816,9 +816,9 @@ def _convert_unit_to_subdivision_atomic(
                     'temp_res': f"customers/{customer_id}/adGroupCriteria/{ad_group_id}~{excl_temp_id}",
                     'parent_temp_res': new_node['temp_res'],
                     'type': 'UNIT',
-                    'case_value': excl_node['case_value'],
-                    'negative': excl_node['negative'],
-                    'bid_micros': excl_node.get('bid_micros'),
+                    'case_value': negative_unit['case_value'],
+                    'negative': negative_unit['negative'],
+                    'bid_micros': negative_unit.get('bid_micros'),
                     'children': []
                 }
                 new_node['children'].append(excl)
@@ -935,8 +935,8 @@ def _convert_unit_to_subdivision_atomic(
                 criterion.listing_group.case_value.product_item_id._pb.MergeFrom(empty_item_id._pb)
                 print(f"      ⚠️ WARNING: Node {node['temp_id']} has no case_value, defaulting to Item-ID OTHERS")
 
-        # Set bid
-        if node.get('bid_micros'):
+        # Set bid (only for UNIT nodes - subdivisions cannot have bids)
+        if node.get('bid_micros') and node['type'] == 'UNIT':
             criterion.cpc_bid_micros = node['bid_micros']
 
         operations.append(create_op)

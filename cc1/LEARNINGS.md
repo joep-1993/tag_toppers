@@ -272,3 +272,23 @@ _Session: 2025-10-28_
   ```
 - **Code Location**: GSD_tagtoppers.py:1006-1016, 1030-1040
 - **Benefits**: Allows script to handle idempotency gracefully
+
+##### Custom Label Unit Conversion (2025-10-31)
+- **Problem**: Script only converted Custom Label OTHERS units to subdivisions, failed on VALUE units (e.g., label="b")
+- **Symptom**: `LISTING_GROUP_REQUIRES_SAME_DIMENSION_TYPE_AS_SIBLINGS` when trying to add Item-ID siblings to Custom Label siblings
+- **Root Cause**: Detection logic only looked for OTHERS units (`if not attr_value`), missed positive units with values
+- **Solution**: Collect ALL positive (non-negative) Custom Label units for conversion:
+  ```python
+  # Collect POSITIVE (non-negative) units for conversion
+  # This includes both OTHERS and VALUE units
+  if not child_node['negative']:
+      positive_non_item_id_units.append({
+          'res_name': child_res,
+          'case_value': case_val,
+          'bid_micros': child_node['bid_micros']
+      })
+  ```
+- **Conversion Process**: Each positive unit → SUBDIVISION with Item-ID OTHERS + Item-ID exclusions as children
+- **Example**: Label "b" UNIT → Label "b" SUBDIVISION → [Item-ID OTHERS, Item-ID exclusions...]
+- **Code Location**: listing_tree.py:233-240 (detection), 757-807 (conversion)
+- **Key Insight**: ALL positive Custom Label units need Item-ID level, not just OTHERS units

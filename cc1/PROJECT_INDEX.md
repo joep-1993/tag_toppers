@@ -72,6 +72,8 @@ _Add as you build_
 - `test_fixed_script.py` - Test script for verifying custom label exclusion preservation
 - `test_exclusion_preservation.py` - Alternative test script for tree rebuild validation
 - `test_fix.py` - Test script for verifying batch subdivision processing (multiple subdivisions processed in single tree rebuild)
+- `analyze_trees.py` - Utility script for comparing listing tree structures between ad groups
+- `test_label_b_conversion.py` - Test script for verifying Custom Label VALUE unit conversion to subdivision
 
 ## Dependencies
 _Major libraries and frameworks_
@@ -89,4 +91,4 @@ _Important technical and architectural decisions_
 - Using Google OAuth for authentication
 
 ---
-_Last updated: 2025-10-30_
+_Last updated: 2025-10-31_

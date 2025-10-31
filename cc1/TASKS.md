@@ -10,6 +10,7 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Fix listing tree to handle Custom Label VALUE units - extended tree conversion to handle ALL positive Custom Label units (not just OTHERS), enabling Item-ID exclusions for value-based label structures #claude-session:2025-10-31
 - [x] Improve LISTING_GROUP_ALREADY_EXISTS error handling - treat duplicate listing errors as non-critical warnings #claude-session:2025-10-30
 - [x] Fix tag_toppers campaign tree processing - skip tag_toppers campaigns in label-based tree logic #claude-session:2025-10-30
 - [x] Fix CANNOT_SET_BIDS_ON_LISTING_GROUP_SUBDIVISION error - bids now only set on UNIT nodes #claude-session:2025-10-30
