@@ -18,6 +18,7 @@ import time
 import json
 import re
 import os
+from collections import OrderedDict
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -33,39 +34,51 @@ from listing_tree import rebuild_tree_with_label_and_item_ids
 # OAuth / Config
 # =========================
 
-refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN", "your-refresh-token-here")
-developer_token = os.getenv("GOOGLE_DEVELOPER_TOKEN", "your-developer-token-here")
-login_customer_id = os.getenv("GOOGLE_LOGIN_CUSTOMER_ID", "your-login-customer-id")
+REQUIRED_CREDS = (
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REFRESH_TOKEN",
+    "GOOGLE_DEVELOPER_TOKEN",
+    "GOOGLE_LOGIN_CUSTOMER_ID",
+)
 
-def load_google_oauth_from_env():
-    # First try environment variables
-    cid = os.getenv("GOOGLE_CLIENT_ID")
-    cs  = os.getenv("GOOGLE_CLIENT_SECRET")
+def load_google_credentials():
+    """Environment variables eerst, dan het 'creds' bestand naast het script.
 
-    # If not found, try loading from creds file
-    if not cid or not cs:
-        creds_file = os.path.join(os.path.dirname(__file__), 'creds')
+    Alle vijf worden op dezelfde manier geladen: in WSL staan CLIENT_ID/SECRET wel
+    in de Windows env maar de andere drie niet, dus een file-fallback voor slechts
+    twee ervan laat het script alsnog stranden op 'login customer ID is invalid'.
+    """
+    vals = {k: os.getenv(k) for k in REQUIRED_CREDS}
+
+    if not all(vals.values()):
+        creds_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'creds')
         if os.path.exists(creds_file):
             with open(creds_file, 'r') as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith('GOOGLE_CLIENT_ID='):
-                        cid = line.split('=', 1)[1]
-                    elif line.startswith('GOOGLE_CLIENT_SECRET='):
-                        cs = line.split('=', 1)[1]
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    if k in REQUIRED_CREDS and not vals.get(k):
+                        vals[k] = v.strip().strip('"').strip("'")
 
-    missing = []
-    if not cid: missing.append("GOOGLE_CLIENT_ID")
-    if not cs:  missing.append("GOOGLE_CLIENT_SECRET")
+    missing = [k for k in REQUIRED_CREDS if not vals.get(k)]
     if missing:
         raise RuntimeError(
-            "Environment variables ontbreken: "
+            "Credentials ontbreken: "
             + ", ".join(missing)
-            + ".\nZet deze in het 'creds' bestand of als environment variables."
+            + ".\nZet deze in het 'creds' bestand naast dit script of als environment variables."
         )
-    return cid, cs
+    return vals
 
-client_id, client_secret = load_google_oauth_from_env()
+_creds_cfg = load_google_credentials()
+client_id         = _creds_cfg["GOOGLE_CLIENT_ID"]
+client_secret     = _creds_cfg["GOOGLE_CLIENT_SECRET"]
+refresh_token     = _creds_cfg["GOOGLE_REFRESH_TOKEN"]
+developer_token   = _creds_cfg["GOOGLE_DEVELOPER_TOKEN"]
+login_customer_id = _creds_cfg["GOOGLE_LOGIN_CUSTOMER_ID"]
 
 # Google Ads client (OAuth via refresh token)
 google_ads_config = {
@@ -898,32 +911,225 @@ def get_negatives(shopname):
 
 
 def add_negative_keywords(client, customer_id, campaign_resource_name, negative_keywords):
-    campaign_criterion_service = client.get_service("CampaignCriterionService")
+    """Merk-negatives (shopnaam + kaal domein) als EXACT én PHRASE.
 
-    # Maak een lijst van operations om zowel EXACT als PHRASE varianten toe te voegen
-    operations = []
+    Dedupliceert tegen wat er al staat, want de zuster-sync hieronder heeft deze
+    meestal al meegenomen — zonder die check levert dat CRITERION_DUPLICATE op.
+    """
+    if not campaign_resource_name:
+        return []
 
+    campaign_id = int(campaign_resource_name.split("/")[-1])
+    existing = fetch_campaign_negatives(client, customer_id, campaign_id)
+
+    pairs = []
     for keyword in negative_keywords:
-        for match_type in [client.enums.KeywordMatchTypeEnum.EXACT, client.enums.KeywordMatchTypeEnum.PHRASE]:
-            campaign_criterion_operation = client.get_type("CampaignCriterionOperation")
-            campaign_criterion = campaign_criterion_operation.create
+        for match_type in ("EXACT", "PHRASE"):
+            if _neg_key(keyword, match_type) in existing:
+                continue
+            pairs.append((keyword, match_type))
 
-            campaign_criterion.campaign = campaign_resource_name
-            campaign_criterion.negative = True  # Markeer als negatief zoekwoord
-            campaign_criterion.keyword.text = keyword
-            campaign_criterion.keyword.match_type = match_type  # Voeg zowel EXACT als PHRASE toe
+    if not pairs:
+        print(f"                Merk-negatives stonden er al: {negative_keywords}")
+        return []
 
-            operations.append(campaign_criterion_operation)
+    added, errors = add_negative_criteria(client, customer_id, campaign_resource_name, pairs)
+    print(f"                {len(added)} merk-negatives toegevoegd (EXACT & PHRASE): {negative_keywords}")
+    for e in errors:
+        print(f"                   ⚠️ {e[:200]}")
+    return added
 
-    # Verstuur de mutatie-aanvraag naar Google Ads API
-    try:
-        response = campaign_criterion_service.mutate_campaign_criteria(
-            customer_id=customer_id, operations=operations
+
+# =========================
+# Negatives overnemen van de zustercampagne (zelfde shop + shop_id)
+# =========================
+
+NEG_MATCH_ORDER = {"EXACT": 0, "PHRASE": 1, "BROAD": 2}
+# Voorkeur als een shop meerdere zusters heeft: label:a eerst, dan b, c, ...
+SIBLING_LABEL_PREF = ["[label:a]", "[label:b]", "[label:c]", "[label:no_ean]", "[label:no_data]"]
+
+
+def _shop_key(name):
+    """Normaliseert een shopnaam voor vergelijking tussen campagnes van dezelfde shop.
+
+    Case verschilt tussen campagnes van één shop ([shop:All4fysio.nl] vs
+    [shop:all4fysio.nl]) en locale-suffixen zijn dezelfde shop (e5.be|NL == e5.be/nl),
+    dus knippen op de eerste | of /. Bewust conservatief: Decantalo.com en Decantalo.de
+    blijven verschillend, net als Ubisoft.com en store.ubisoft.com.
+    """
+    return re.sub(r"\s*[|/].*$", "", (name or "").strip().lower())
+
+
+def _neg_key(text, match_type):
+    """Google matcht negatives case-insensitief, maar bewaart 'emma' en 'Emma' wél als
+    aparte criteria. Dedupliceer daarom op (lowercase tekst, match type)."""
+    return (str(text).strip().lower(), match_type)
+
+
+def find_sibling_campaign(client, customer_id, shopid, shopname):
+    """De niet-tag_toppers [channel:directshopping]-campagne van dezelfde shop.
+
+    Matcht op shopnaam ÉN shop_id. Alleen op shop_id matchen mag niet: die is geen
+    unieke sleutel (652237 is zowel Bruna.nl als Hubfootwear.com, 652554 zowel
+    Desigual.com|DE als MK-Angelsport.de), dus dat kopieert merk-negatives naar een
+    vreemde shop. ENABLED heeft voorkeur; PAUSED is de fallback, want bij veel shops
+    staat de hele campagnegroep gepauzeerd en is dat de enige bron.
+    """
+    ga = client.get_service("GoogleAdsService")
+    q = f"""
+        SELECT campaign.id, campaign.name, campaign.status
+        FROM campaign
+        WHERE campaign.name LIKE '%shop_id:{shopid}]%'
+          AND campaign.status != 'REMOVED'
+    """
+    want = _shop_key(shopname)
+    cands = []
+    for row in ga.search(customer_id=customer_id, query=q):
+        low = row.campaign.name.lower()
+        if "[label:tag_toppers]" in low or "[channel:directshopping]" not in low:
+            continue
+        m = re.search(r"\[shop:([^\]]+)\]", row.campaign.name)
+        if not m or _shop_key(m.group(1)) != want:
+            continue
+        cands.append(row)
+
+    for status in ("ENABLED", "PAUSED"):
+        pool = [c for c in cands if c.campaign.status.name == status]
+        if not pool:
+            continue
+        for lbl in SIBLING_LABEL_PREF:
+            hits = sorted([c for c in pool if lbl in c.campaign.name.lower()],
+                          key=lambda c: c.campaign.id)
+            if hits:
+                return hits[0]
+        return sorted(pool, key=lambda c: c.campaign.id)[0]
+    return None
+
+
+def fetch_campaign_negatives(client, customer_id, campaign_id):
+    """{(tekst_lower, match_type): (tekst, match_type)} van de negatives op campagne-niveau.
+
+    Campagne-criteria zijn de enige bron in deze accounts: er staan geen negatives op
+    ad-group-niveau, en elke koppeling met de gedeelde lijst "Direct Shopping Negatives"
+    heeft status REMOVED.
+    """
+    ga = client.get_service("GoogleAdsService")
+    q = f"""
+        SELECT campaign_criterion.keyword.text,
+               campaign_criterion.keyword.match_type,
+               campaign_criterion.status
+        FROM campaign_criterion
+        WHERE campaign.id = {campaign_id}
+          AND campaign_criterion.type = 'KEYWORD'
+          AND campaign_criterion.negative = TRUE
+    """
+    out = OrderedDict()
+    for row in ga.search(customer_id=customer_id, query=q):
+        cc = row.campaign_criterion
+        if cc.status.name == "REMOVED":
+            continue
+        out.setdefault(
+            _neg_key(cc.keyword.text, cc.keyword.match_type.name),
+            (cc.keyword.text, cc.keyword.match_type.name),
         )
-        print(
-            f"                {len(negative_keywords) * 2} negatieve zoekwoorden toegevoegd (EXACT & PHRASE) aan campagne {campaign_resource_name}: {negative_keywords}")
-    except GoogleAdsException as ex:
-        print(f"                [Error] Fout bij toevoegen van negatieve zoekwoorden: {ex}")
+    return out
+
+
+def add_negative_criteria(client, customer_id, campaign_resource_name, pairs, validate_only=False):
+    """pairs: lijst van (tekst, match_type-naam). Geeft (toegevoegd, fouten) terug.
+
+    validate_only=True laat Google de operaties volledig valideren zonder te schrijven —
+    handig als dry-run, omdat een run waarin niets muteert het schrijfpad niet test.
+    """
+    if not pairs:
+        return [], []
+
+    svc = client.get_service("CampaignCriterionService")
+    ops = []
+    for text, mt in pairs:
+        op = client.get_type("CampaignCriterionOperation")
+        c = op.create
+        c.campaign = campaign_resource_name
+        c.negative = True
+        c.keyword.text = text
+        c.keyword.match_type = client.enums.KeywordMatchTypeEnum[mt]
+        ops.append(op)
+
+    added, errors = [], []
+    for i in range(0, len(ops), 200):
+        chunk = ops[i:i + 200]
+        # partial_failure MOET via een request-object; als kwarg wordt het geweigerd door
+        # google-ads v28/v29. Zo laat één afgekeurd keyword de rest van de batch staan.
+        req = client.get_type("MutateCampaignCriteriaRequest")
+        req.customer_id = str(customer_id)
+        req.operations.extend(chunk)
+        req.partial_failure = True
+        req.validate_only = validate_only
+        try:
+            resp = svc.mutate_campaign_criteria(request=req)
+        except GoogleAdsException as ex:
+            errors.append(f"batch {i}: {ex.failure}")
+            continue
+
+        failed_idx = set()
+        if resp.partial_failure_error and resp.partial_failure_error.details:
+            failure_type = client.get_type("GoogleAdsFailure")
+            for det in resp.partial_failure_error.details:
+                f = type(failure_type).deserialize(det.value)
+                for err in f.errors:
+                    idx = None
+                    for el in err.location.field_path_elements:
+                        if el.field_name == "operations":
+                            idx = el.index
+                    if idx is None:
+                        errors.append(err.message)
+                    else:
+                        failed_idx.add(idx)
+                        errors.append(f"{chunk[idx].create.keyword.text}: {err.message}")
+
+        if validate_only:
+            # validate_only levert geen results terug; alles wat niet afkeurde zou landen.
+            added.extend(pairs[i:i + len(chunk)])
+            continue
+        for j, res in enumerate(resp.results):
+            if j in failed_idx or not res.resource_name:
+                continue
+            added.append(pairs[i + j])
+    return added, errors
+
+
+def sync_negatives_from_sibling(client, customer_id, campaign_resource_name, shopid, shopname,
+                                validate_only=False):
+    """Neemt de negatives van de zustercampagne over in de tag_toppers-campagne.
+
+    Idempotent: bij een herhaalde run staat alles al in sync en wordt er niets geschreven.
+    """
+    if not campaign_resource_name:
+        return [], None
+
+    campaign_id = int(campaign_resource_name.split("/")[-1])
+    sibling = find_sibling_campaign(client, customer_id, shopid, shopname)
+    if sibling is None:
+        print(f"                ℹ️ Geen zustercampagne voor {shopname} ({shopid}) — negatives niet gesynct")
+        return [], None
+
+    src = fetch_campaign_negatives(client, customer_id, sibling.campaign.id)
+    dst = fetch_campaign_negatives(client, customer_id, campaign_id)
+    missing = [v for k, v in src.items() if k not in dst]
+    missing.sort(key=lambda x: (NEG_MATCH_ORDER.get(x[1], 9), x[0].lower()))
+
+    label = f"{sibling.campaign.name} [{sibling.campaign.status.name}]"
+    if not missing:
+        print(f"                ✅ Negatives al in sync met zuster ({len(src)}): {label}")
+        return [], sibling
+
+    added, errors = add_negative_criteria(client, customer_id, campaign_resource_name, missing,
+                                          validate_only=validate_only)
+    prefix = "DRY RUN — zou " if validate_only else ""
+    print(f"                ➕ {prefix}{len(added)}/{len(missing)} negatives overnemen van zuster: {label}")
+    for e in errors:
+        print(f"                   ⚠️ {e[:200]}")
+    return added, sibling
 
 
 # =========================
@@ -991,11 +1197,18 @@ if __name__ == "__main__":
         # 2) Nieuwe (of hergebruik) tag_toppers campagne opzetten met ONLY specific item IDs (NEW LOGIC - INCLUSIVE)
         try:
             campaign_resource_name = create_tag_toppers_campaign(client, customer_id, mc_id, tracking_template, str(shopid), shopname, item_ids)
-            branded = get_branded(shopname)
 
-            if branded == 0:
-                negative_keywords = get_negatives(shopname)
-                add_negative_keywords(client, customer_id, campaign_resource_name, negative_keywords)
+            if not campaign_resource_name:
+                row_processed_successfully = False
+            else:
+                # Eerst de zustercampagne: die set is rijker en bevat de merk-negatives
+                # meestal al, dus daarna hoeft add_negative_keywords alleen het gat te vullen.
+                sync_negatives_from_sibling(client, customer_id, campaign_resource_name, str(shopid), shopname)
+
+                branded = get_branded(shopname)
+                if branded == 0:
+                    negative_keywords = get_negatives(shopname)
+                    add_negative_keywords(client, customer_id, campaign_resource_name, negative_keywords)
 
         except GoogleAdsException as ex:
             print(f"                ❌ Google Ads API error (create_tag_toppers): {ex.failure}")

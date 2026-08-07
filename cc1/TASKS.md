@@ -10,6 +10,16 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Zuster-negatives overnemen bij het aanmaken van een tag_toppers-campagne — `find_sibling_campaign` /
+      `fetch_campaign_negatives` / `add_negative_criteria` / `sync_negatives_from_sibling`, aangeroepen in
+      `main` vóór de merk-negatives. Match op shopnaam **én** shop_id (shop_id alleen is geen sleutel),
+      naam genormaliseerd op case + suffix, ENABLED vóór PAUSED, dedupe op (lowercase, matchtype).
+      Geverifieerd: 881/881 campagnes vinden hun zuster (NL 507 / BE 351 / DE 23, 0 missers).
+      `add_negative_keywords` dedupliceert nu ook, anders botst de merk-negative op de gesyncte set.
+      #claude-session:2026-08-07
+- [x] Credentials werkend in WSL — `load_google_credentials()` leest nu alle vijf waardes uit het
+      `creds`-bestand (was er 2, vandaar "login customer ID is invalid"). #claude-session:2026-08-07
+
 - [x] Fix listing tree to handle Custom Label VALUE units - extended tree conversion to handle ALL positive Custom Label units (not just OTHERS), enabling Item-ID exclusions for value-based label structures #claude-session:2025-10-31
 - [x] Improve LISTING_GROUP_ALREADY_EXISTS error handling - treat duplicate listing errors as non-critical warnings #claude-session:2025-10-30
 - [x] Fix tag_toppers campaign tree processing - skip tag_toppers campaigns in label-based tree logic #claude-session:2025-10-30
