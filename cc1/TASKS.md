@@ -10,6 +10,7 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Nieuwe tag_toppers-campagnes krijgen campagneprioriteit Hoog (`campaign_priority = 2`); vervangt de uitsluitingen in zustercampagnes, die zijn op 2026-10-06 overal weggehaald (zie dm-dashboard `cc1/TASKS.md`). Stap (1) in `GSD_tagtoppers.py` zet ze nog steeds — niet meer gebruiken zonder die eruit te halen. #claude-session:2026-10-06
 - [x] Zuster-negatives overnemen bij het aanmaken van een tag_toppers-campagne — `find_sibling_campaign` /
       `fetch_campaign_negatives` / `add_negative_criteria` / `sync_negatives_from_sibling`, aangeroepen in
       `main` vóór de merk-negatives. Match op shopnaam **én** shop_id (shop_id alleen is geen sleutel),
