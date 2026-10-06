@@ -230,7 +230,9 @@ def add_standard_shopping_campaign(
     campaign.name = campaign_name
     campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.SHOPPING
     campaign.shopping_setting.merchant_id = int(merchant_center_account_id)
-    campaign.shopping_setting.campaign_priority = 0
+    # Prioriteit Hoog (2): tag_toppers wint daarmee de veiling van de
+    # zustercampagnes van de shop, in plaats van uitsluitingen daar (2026-10-06).
+    campaign.shopping_setting.campaign_priority = 2
     campaign.shopping_setting.enable_local = True
     campaign.tracking_url_template = tracking_template
     campaign.contains_eu_political_advertising = (
